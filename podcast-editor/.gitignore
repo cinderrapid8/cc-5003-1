@@ -1,0 +1,7 @@
+/target
+/run_data
+/data
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+**/*.tmp.*

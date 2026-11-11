@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>访谈播客剪辑台</title>
+<style>
+  :root { --bg:#14161a; --panel:#1d2127; --line:#2b313a; --fg:#e6e9ee; --mut:#8a93a0;
+          --accent:#5aa2ff; --warn:#ffb454; --ok:#58d68d; --danger:#ff6b6b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:13px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; }
+  header { display:flex; align-items:center; gap:12px; padding:10px 16px;
+           background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  button,select,input { font:inherit; }
+  button { background:#262c34; color:var(--fg); border:1px solid var(--line);
+           border-radius:6px; padding:6px 12px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#081322; font-weight:600; }
+  button.danger { color:var(--danger); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  .wrap { display:grid; grid-template-columns:300px 1fr; gap:12px; padding:12px; height:calc(100vh - 56px); }
+  .col { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; overflow:auto; }
+  .field { margin-bottom:10px; }
+  label { display:block; color:var(--mut); margin-bottom:4px; font-size:12px; }
+  input,select { width:100%; background:#12151a; border:1px solid var(--line); color:var(--fg);
+                 border-radius:6px; padding:6px 8px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  .row > * { flex:1; }
+  h2 { font-size:13px; color:var(--mut); text-transform:uppercase; letter-spacing:.06em; margin:16px 0 8px; }
+  ul.items { list-style:none; margin:0; padding:0; }
+  ul.items li { border:1px solid var(--line); border-radius:6px; padding:8px; margin-bottom:6px; cursor:pointer; }
+  ul.items li.sel { border-color:var(--accent); background:#1c2735; }
+  ul.items li small { color:var(--mut); }
+  .canvasbar { display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap; }
+  canvas { width:100%; background:#0f1216; border:1px solid var(--line); border-radius:6px; display:block; }
+  .tag { font-size:11px; color:var(--mut); }
+  .pill { font-size:11px; padding:2px 8px; border-radius:999px; background:#262c34; border:1px solid var(--line); }
+  .pill.stale { color:var(--warn); border-color:var(--warn); }
+  .pill.ok { color:var(--ok); border-color:var(--ok); }
+  #msg { min-height:20px; font-size:12px; }
+  #msg.warn { color:var(--warn); } #msg.err { color:var(--danger); } #msg.ok { color:var(--ok); }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .srcview { margin-top:10px; }
+  .muted { color:var(--mut); }
+  .xfbox { border:1px solid var(--line); border-radius:6px; padding:8px; margin-top:8px; }
+  .xfbox .avail { color:var(--warn); font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>访谈播客剪辑台</h1>
+  <span class="pill" id="ratePill">工程：未创建</span>
+  <span class="pill" id="verPill">版本 -</span>
+  <span class="pill" id="stalePill" style="display:none">波形已过期</span>
+  <div style="flex:1"></div>
+  <button id="undoBtn">撤销</button>
+  <button id="redoBtn">重做</button>
+  <button id="exportBtn" class="primary">导出 WAV</button>
+  <button id="cancelExportBtn" class="danger" disabled>取消导出</button>
+</header>
+
+<div class="wrap">
+  <!-- 左栏：工程/素材/片段 -->
+  <div class="col">
+    <h2>工程</h2>
+    <div class="grid2">
+      <div class="field"><label>名称</label><input id="pname" value="我的访谈" /></div>
+      <div class="field"><label>工程采样率（时间基准）</label>
+        <select id="prate"><option>48000</option><option>44100</option><option>24000</option></select></div>
+    </div>
+    <button id="createBtn" class="primary" style="width:100%">新建工程</button>
+
+    <h2>原始素材（只读引用）</h2>
+    <div class="field">
+      <input type="file" id="fileInput" accept=".wav" disabled />
+    </div>
+    <div class="row">
+      <button id="sigSpeech" disabled>生成语音节奏</button>
+      <button id="sigPulse" disabled>生成单脉冲</button>
+      <button id="sigSine" disabled>生成相位正弦</button>
+    </div>
+    <ul class="items" id="srcList"></ul>
+    <div class="tag">原录音永不被覆盖；编辑只保存引用的帧范围。</div>
+
+    <h2>时间线片段</h2>
+    <div class="field">
+      <label>用所选素材加入片段（源帧范围）</label>
+      <div class="grid2">
+        <input id="addStart" type="number" value="0" />
+        <input id="addEnd" type="number" value="0" />
+      </div>
+    </div>
+    <button id="addItemBtn" style="width:100%" disabled>加入片段</button>
+    <ul class="items" id="itemList" style="margin-top:8px"></ul>
+
+    <h2>保留静音 / 顺序</h2>
+    <div class="row">
+      <input id="silLen" type="number" value="2400" />
+      <button id="silBtn" disabled>插入静音(帧)</button>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <button id="upBtn" disabled>上移</button>
+      <button id="downBtn" disabled>下移</button>
+    </div>
+  </div>
+
+  <!-- 右栏：波形与预览 -->
+  <div class="col">
+    <div class="canvasbar">
+      <button id="zoomOut">－</button>
+      <span class="pill" id="zoomPill">每桶 256 帧</span>
+      <button id="zoomIn">＋</button>
+      <span style="flex:1"></span>
+      <span class="tag">时间线总长度：<b id="totalLen">-</b> 工程帧</span>
+      <button id="refreshWave">刷新波形</button>
+    </div>
+    <canvas id="tlCanvas" height="180"></canvas>
+    <div class="canvasbar" style="margin-top:10px">
+      <span class="tag">试听游标（工程帧）：<b id="curFrame">0</b></span>
+      <button id="locateSrc">游标 → 原素材位置</button>
+      <span class="tag" id="locateOut">—</span>
+    </div>
+
+    <h2>选中片段操作</h2>
+    <div class="grid2">
+      <div class="field"><label>截取起点（源帧）</label><input id="trimStart" type="number" /></div>
+      <div class="field"><label>截取终点（源帧，不含）</label><input id="trimEnd" type="number" /></div>
+    </div>
+    <div class="row">
+      <button id="trimBtn" disabled>截取（只改引用）</button>
+      <button id="splitBtn" disabled>在该源帧切分</button>
+      <input id="splitAt" type="number" placeholder="切分源帧" />
+    </div>
+
+    <div class="xfbox">
+      <label>与下一片段的交叉淡化（工程帧，需两侧真实余量）</label>
+      <div class="row">
+        <input id="xfFrames" type="number" value="0" />
+        <button id="xfBtn" disabled>设置交叉淡化</button>
+      </div>
+      <div class="avail" id="xfAvail">选择片段后显示可用长度</div>
+    </div>
+
+    <h2>原素材波形（点击定位源帧）</h2>
+    <canvas id="srcCanvas" height="120" class="srcview"></canvas>
+    <div class="tag" id="srcInfo">—</div>
+
+    <h2>试听（预览渲染，与导出同一渲染路径）</h2>
+    <div class="row">
+      <button id="previewBtn" disabled>生成预览</button>
+      <span class="pill ok" id="previewPill">未渲染</span>
+    </div>
+    <audio id="player" controls style="width:100%;margin-top:8px"></audio>
+    <div id="msg"></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let state = {
+  project:null, sources:[], items:[], selectedItem:null, selectedSource:null,
+  bucketFrames:256, waveVersion:null, cursor:0, previewUrl:null,
+  exportJob:null, srcBuckets:null, tlBuckets:null,
+};
+
+function msg(text, kind="") { const m=$("msg"); m.textContent=text; m.className=kind; }
+async function api(path, opts={}) {
+  const res = await fetch(path, { headers:{"Content-Type":"application/json"}, ...opts });
+  if (!res.ok) throw new Error((await res.text()) || res.statusText);
+  return res.status===200 ? res.json() : null;
+}
+function setStale(stale) {
+  $("stalePill").style.display = stale ? "inline-block" : "none";
+}
+function syncProject(p) {
+  state.project = p; state.items = p.items || [];
+  $("verPill").textContent = "版本 " + p.version;
+  $("ratePill").textContent = "工程：" + p.sample_rate + " Hz / " + p.channels + " 声道";
+  $("totalLen").textContent = timelineTotal();
+  setStale(false);
+  renderItemList();
+  loadWaveform();
+}
+function timelineTotal() {
+  // 仅用于展示；权威长度以后端渲染 frame_count 为准。
+  let end = 0;
+  for (const it of state.items) {
+    const src = state.sources.find(s=>s.id===it.source_id);
+    const sr = src ? src.original_rate : state.project.sample_rate;
+    const len = Math.round((it.source_end-it.source_start) * state.project.sample_rate / sr);
+    end = Math.max(end, it.timeline_start + len);
+  }
+  return end;
+}
+
+// ---------- 工程 ----------
+$("createBtn").onclick = async () => {
+  const p = await api("/api/projects", { method:"POST", body:JSON.stringify({
+    name:$("pname").value, sample_rate:+$("prate").value, channels:1 })});
+  state.sources=[]; state.items=[]; state.selectedItem=null; state.selectedSource=null;
+  ["fileInput","addItemBtn","silBtn","upBtn","downBtn","trimBtn","splitBtn","xfBtn",
+   "previewBtn","sigSpeech","sigPulse","sigSine"].forEach(id=>$(id).disabled=false);
+  await refreshSources();
+  syncProject(p);
+  msg("工程已创建，采样率即全工程时间基准（位置均为采样帧整数）。","ok");
+};
+
+async function refreshSources() {
+  state.sources = await api(`/api/projects/${state.project.id}/sources`);
+  const ul=$("srcList"); ul.innerHTML="";
+  for (const s of state.sources) {
+    const li=document.createElement("li");
+    li.innerHTML = `<b>${s.id.slice(-6)}</b><br><small>${s.original_rate}Hz · ${s.frame_count} 帧 · ${s.channels} 声道</small>`;
+    li.onclick = ()=>{ state.selectedSource=s; [...ul.children].forEach(c=>c.classList.remove("sel"));
+      li.classList.add("sel"); $("addEnd").value=s.frame_count; loadSourceWave(); };
+    ul.appendChild(li);
+  }
+}
+
+// ---------- 素材上传 / 测试信号 ----------
+$("fileInput").onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  const res = await fetch(`/api/projects/${state.project.id}/sources`, { method:"POST", body:fd });
+  if (!res.ok) return msg("上传失败：" + await res.text(), "err");
+  await refreshSources();
+  const p = await api(`/api/projects/${state.project.id}`); syncProject(p);
+  msg("素材已登记为只读引用，原始文件未被修改。","ok");
+};
+async function makeSignal(kind, param) {
+  const r = await api("/api/test-signal", { method:"POST",
+    body:JSON.stringify({ kind, sample_rate:state.project.sample_rate, frames:48000, param })});
+  // 信号已由后端写入数据目录，登记为只读素材（复用统一入库路径）。
+  const res = await fetch(`/api/projects/${state.project.id}/sources/register`, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ path:r.path, name:kind+".wav" })
+  });
+  if (!res.ok) return msg("信号登记失败：" + await res.text(),"err");
+  await refreshSources();
+  const p = await api(`/api/projects/${state.project.id}`); syncProject(p);
+  msg("测试信号已生成并登记。","ok");
+}
+$("sigSpeech").onclick=()=>makeSignal("speech",2400);
+$("sigPulse").onclick=()=>makeSignal("pulse",1200);
+$("sigSine").onclick=()=>makeSignal("sine",440);
+
+// ---------- 片段 ----------
+$("addItemBtn").onclick = async () => {
+  if (!state.selectedSource) return msg("请先选择一个素材。","warn");
+  const p = await api(`/api/projects/${state.project.id}/items`, { method:"POST", body:JSON.stringify({
+    source_id:state.selectedSource.id, source_start:+$("addStart").value, source_end:+$("addEnd").value })});
+  syncProject(p); msg("片段已加入（引用范围，未改动原录音）。","ok");
+};
+function renderItemList() {
+  const ul=$("itemList"); ul.innerHTML="";
+  state.items.forEach((it,idx)=>{
+    const src=state.sources.find(s=>s.id===it.source_id);
+    const li=document.createElement("li");
+    if (state.selectedItem && state.selectedItem.id===it.id) li.classList.add("sel");
+    li.innerHTML=`<b>#${idx+1} 片段 ${it.id.slice(-6)}</b><br>
+      <small>素材 ${it.source_id.slice(-6)} · 源帧 ${it.source_start}…${it.source_end}
+      · 时间线帧 ${it.timeline_start}${it.crossfade_out?(" · 淡化 "+it.crossfade_out):""}</small><br>
+      <small class="muted">${src?src.original_rate+"Hz":""} · 长度 ${it.source_end-it.source_start} 源帧</small>`;
+    li.onclick=()=>selectItem(it);
+    ul.appendChild(li);
+  });
+}
+function selectItem(it) {
+  state.selectedItem=it;
+  $("trimStart").value=it.source_start; $("trimEnd").value=it.source_end;
+  $("xfFrames").value=it.crossfade_out; $("splitAt").value=it.source_start;
+  renderItemList(); updateXfAvail();
+}
+$("trimBtn").onclick = async () => {
+  const it=state.selectedItem; if(!it) return;
+  try {
+    const p = await api(`/api/projects/${state.project.id}/trim`,{method:"POST",body:JSON.stringify({
+      item_id:it.id, source_start:+$("trimStart").value, source_end:+$("trimEnd").value })});
+    syncProject(p); msg("已截取：仅引用范围改变，原录音完整保留。","ok");
+  } catch(e){ msg(e.message,"err"); }
+};
+$("splitBtn").onclick = async () => {
+  const it=state.selectedItem; if(!it) return;
+  try {
+    const p = await api(`/api/projects/${state.project.id}/split`,{method:"POST",body:JSON.stringify({
+      item_id:it.id, at_source_frame:+$("splitAt").value })});
+    syncProject(p); msg("已切分为两个连续引用。","ok");
+  } catch(e){ msg(e.message,"err"); }
+};
+$("upBtn").onclick=()=>move(-1);
+$("downBtn").onclick=()=>move(1);
+async function move(d) {
+  const idx=state.items.findIndex(i=>state.selectedItem && i.id===state.selectedItem.id);
+  const target=idx+d; if(idx<0||target<0||target>=state.items.length) return;
+  const p=await api(`/api/projects/${state.project.id}/reorder`,{method:"POST",
+    body:JSON.stringify({ item_id:state.selectedItem.id, target_index:target })});
+  syncProject(p);
+}
+$("silBtn").onclick = async () => {
+  const p=await api(`/api/projects/${state.project.id}/silence`,{method:"POST",
+    body:JSON.stringify({ length:+$("silLen").value })});
+  syncProject(p); msg("已插入显式静音（保留静音，非删除空隙）。","ok");
+};
+
+// ---------- 交叉淡化 ----------
+$("xfBtn").onclick = async () => {
+  const it=state.selectedItem; if(!it) return;
+  try {
+    const r=await api(`/api/projects/${state.project.id}/crossfade`,{method:"POST",
+      body:JSON.stringify({ item_id:it.id, frames:+$("xfFrames").value })});
+    syncProject(r.project);
+    if (r.margin && !r.margin.feasible)
+      msg(`素材到头：请求 ${r.margin.requested} 帧，但两侧真实余量最多 ${r.margin.max_feasible} 帧。`,"warn");
+    else msg("交叉淡化已设置；渲染前会再次校验真实余量。","ok");
+    updateXfAvail();
+  } catch(e){ msg(e.message,"err"); }
+};
+function updateXfAvail() {
+  const it=state.selectedItem; if(!it){ $("xfAvail").textContent="选择片段后显示可用长度"; return; }
+  const idx=state.items.findIndex(i=>i.id===it.id); const next=state.items[idx+1];
+  if(!next){ $("xfAvail").textContent="这是最后一条片段，没有下一片段可做交叉淡化。"; return; }
+  const curSrc=state.sources.find(s=>s.id===it.source_id);
+  const nextSrc=state.sources.find(s=>s.id===next.source_id);
+  const tail=Math.round((it.source_end-it.source_start)*state.project.sample_rate/curSrc.original_rate);
+  const head=Math.round((next.source_end-next.source_start)*state.project.sample_rate/nextSrc.original_rate);
+  const max=Math.min(tail,head);
+  $("xfAvail").innerHTML = `当前尾部余量 <b>${tail}</b> 帧，下一片段头部余量 <b>${head}</b> 帧；
+    最大可行淡化 <b>${max}</b> 工程帧。超过会在渲染时被拒绝。`;
+}
+
+// ---------- 撤销 / 重做 ----------
+$("undoBtn").onclick=async()=>{ try{ syncProject(await api(`/api/projects/${state.project.id}/undo`,{method:"POST"}));
+  msg("已撤销（旧波形响应会因版本不符被丢弃）。","ok"); }catch(e){ msg(e.message,"warn"); }};
+$("redoBtn").onclick=async()=>{ try{ syncProject(await api(`/api/projects/${state.project.id}/redo`,{method:"POST"}));
+  msg("已重做。","ok"); }catch(e){ msg(e.message,"warn"); }};
+
+// ---------- 波形（带版本戳，撤销后丢弃过期响应） ----------
+$("zoomIn").onclick=()=>{ state.bucketFrames=Math.max(1,Math.floor(state.bucketFrames/2)); $("zoomPill").textContent=`每桶 ${state.bucketFrames} 帧`; loadWaveform(); };
+$("zoomOut").onclick=()=>{ state.bucketFrames*=2; $("zoomPill").textContent=`每桶 ${state.bucketFrames} 帧`; loadWaveform(); };
+$("refreshWave").onclick=loadWaveform;
+
+async function loadWaveform() {
+  if(!state.project) return;
+  const since=state.project.version;
+  try {
+    const r=await api(`/api/projects/${state.project.id}/waveform?bucket_frames=${state.bucketFrames}&since_version=${since}`);
+    // 版本防护：若返回的版本与当前工程不一致，标记过期而不是冒充现状。
+    if (r.version !== state.project.version || r.stale) {
+      setStale(true); msg("波形计算期间工程已变化（可能是撤销），已丢弃旧结果。","warn");
+      return;
+    }
+    state.tlBuckets=r.buckets;
+    drawBuckets($("tlCanvas"), r.buckets, state.items, true);
+  } catch(e){ msg("波形加载失败："+e.message,"err"); }
+}
+async function loadSourceWave() {
+  if(!state.selectedSource) return;
+  const r=await api(`/api/projects/${state.project.id}/waveform?bucket_frames=256&source_id=${state.selectedSource.id}`);
+  state.srcBuckets=r.buckets;
+  drawBuckets($("srcCanvas"), r.buckets, [], false);
+  $("srcInfo").textContent=`素材 ${state.selectedSource.id.slice(-6)}：${state.selectedSource.original_rate}Hz，
+    共 ${state.selectedSource.frame_count} 源帧（点击波形取源帧）`;
+}
+
+function drawBuckets(canvas, buckets, items, drawItems) {
+  const dpr=window.devicePixelRatio||1;
+  const w=canvas.clientWidth, h=canvas.clientHeight;
+  canvas.width=w*dpr; canvas.height=h*dpr;
+  const ctx=canvas.getContext("2d"); ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,w,h);
+  const mid=h/2;
+  ctx.strokeStyle="#5aa2ff"; ctx.lineWidth=1; ctx.beginPath();
+  const bw=Math.max(1,w/buckets.length);
+  buckets.forEach((b,i)=>{
+    const x=i*bw;
+    ctx.moveTo(x, mid + b.max*mid*0.9);
+    ctx.lineTo(x, mid + b.min*mid*0.9);
+  });
+  ctx.stroke();
+  ctx.strokeStyle="#3a424d"; ctx.beginPath(); ctx.moveTo(0,mid); ctx.lineTo(w,mid); ctx.stroke();
+  if(drawItems && items.length) {
+    const total=Math.max(1,timelineTotal());
+    ctx.fillStyle="rgba(90,162,255,.12)"; ctx.strokeStyle="#33507a";
+    items.forEach((it,idx)=>{
+      const src=state.sources.find(s=>s.id===it.source_id);
+      const sr=src?src.original_rate:state.project.sample_rate;
+      const len=Math.round((it.source_end-it.source_start)*state.project.sample_rate/sr);
+      const x=it.timeline_start/total*w, ww=Math.max(2,len/total*w);
+      ctx.fillRect(x,0,ww,h); ctx.strokeRect(x,0,ww,h);
+      if(it.crossfade_out>0){ ctx.fillStyle="rgba(255,180,84,.35)";
+        ctx.fillRect(x+ww-it.crossfade_out/total*w,0,it.crossfade_out/total*w,h); ctx.fillStyle="rgba(90,162,255,.12)"; }
+      ctx.fillStyle="#8a93a0"; ctx.fillText("#"+(idx+1), x+3, 12);
+    });
+  }
+  // 游标
+  if(drawItems){
+    const total=Math.max(1,timelineTotal());
+    const x=state.cursor/total*w;
+    ctx.strokeStyle="#ff6b6b"; ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,h); ctx.stroke();
+  }
+}
+$("tlCanvas").onclick = e => {
+  const rect=e.target.getBoundingClientRect();
+  const frac=(e.clientX-rect.left)/rect.width;
+  state.cursor=Math.round(frac*Math.max(1,timelineTotal()));
+  $("curFrame").textContent=state.cursor;
+  if(state.tlBuckets) drawBuckets($("tlCanvas"), state.tlBuckets, state.items, true);
+};
+$("srcCanvas").onclick = e => {
+  if(!state.selectedSource || !state.srcBuckets) return;
+  const rect=e.target.getBoundingClientRect();
+  const frac=(e.clientX-rect.left)/rect.width;
+  const srcFrame=Math.round(frac*state.selectedSource.frame_count);
+  $("splitAt").value=srcFrame;
+  msg(`已在源帧 ${srcFrame} 定位（可用于切分或截取）。`,"ok");
+};
+
+// ---------- 游标双向定位 ----------
+$("locateSrc").onclick = async () => {
+  const it=state.selectedItem; if(!it) return msg("请先选择片段。","warn");
+  const r=await api(`/api/projects/${state.project.id}/locate?direction=to_source&frame=${state.cursor}&item_id=${it.id}`);
+  $("locateOut").textContent=`→ 素材 ${r.source_id.slice(-6)} 源帧 ${r.source_frame}`;
+};
+
+// ---------- 预览（与导出同一渲染函数） ----------
+$("previewBtn").onclick = async () => {
+  $("previewPill").textContent="渲染中…"; $("previewPill").className="pill";
+  try {
+    const r=await api(`/api/projects/${state.project.id}/render?since_version=${state.project.version}`);
+    if(r.version!==state.project.version){ $("previewPill").textContent="结果已过期"; $("previewPill").className="pill stale"; return; }
+    const pcm=f32ToWav(r.frames, r.sample_rate, r.channels);
+    if(state.previewUrl) URL.revokeObjectURL(state.previewUrl);
+    state.previewUrl=URL.createObjectURL(new Blob([pcm],{type:"audio/wav"}));
+    $("player").src=state.previewUrl;
+    $("previewPill").textContent=`预览就绪 ${r.frame_count} 帧 @${r.sample_rate}Hz`;
+    $("previewPill").className="pill ok";
+  } catch(e){ $("previewPill").textContent="渲染失败"; $("previewPill").className="pill stale"; msg(e.message,"err"); }
+};
+function f32ToWav(f32, rate, ch) {
+  const n=f32.length, buf=new ArrayBuffer(44+n*2), dv=new DataView(buf);
+  const ws=(o,s)=>{ for(let i=0;i<s.length;i++) dv.setUint8(o+i,s.charCodeAt(i)); };
+  ws(0,"RIFF"); dv.setUint32(4,36+n*2,true); ws(8,"WAVE"); ws(12,"fmt ");
+  dv.setUint32(16,16,true); dv.setUint16(20,1,true); dv.setUint16(22,ch,true);
+  dv.setUint32(24,rate,true); dv.setUint32(28,rate*ch*2,true);
+  dv.setUint16(32,ch*2,true); dv.setUint16(34,16,true); ws(36,"data"); dv.setUint32(40,n*2,true);
+  for(let i=0;i<n;i++){ const s=Math.max(-1,Math.min(1,f32[i])); dv.setInt16(44+i*2, s<0?s*32768:s*32767,true); }
+  return buf;
+}
+
+// ---------- 导出 / 取消 ----------
+$("exportBtn").onclick = async () => {
+  const dest=`${state.project.name.replace(/[^\w.-]/g,"_")}_v${state.project.version}.wav`;
+  $("exportBtn").disabled=true; $("cancelExportBtn").disabled=false;
+  msg("导出中（临时文件，完成后原子替换）…");
+  try {
+    const r=await api(`/api/projects/${state.project.id}/export`,{method:"POST",body:JSON.stringify({dest})});
+    if(r.cancelled){ msg("导出已取消，未留下半成品文件。","warn"); }
+    else msg(`导出完成：${r.path}（${r.frames} 帧）。预览与导出使用同一渲染路径。`,"ok");
+  } catch(e){ msg("导出失败："+e.message,"err"); }
+  finally { $("exportBtn").disabled=false; $("cancelExportBtn").disabled=true; }
+};
+$("cancelExportBtn").onclick = async () => {
+  const r=await api(`/api/projects/${state.project.id}/export/cancel`,{method:"POST"});
+  msg(`已请求取消 ${r.cancelled_jobs} 个任务。`,"warn");
+};
+</script>
+</body>
+</html>
