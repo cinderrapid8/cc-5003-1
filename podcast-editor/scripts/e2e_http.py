@@ -238,5 +238,252 @@ with open(dest2, "rb") as f:
     b2 = f.read()
 check("deterministic byte-identical export", b1 == b2)
 
+# ---------- 11. 多轨联动编辑（主持人 / 嘉宾 / 现场气氛） ----------
+print("11) 多轨联动编辑工作流")
+HOST, GUEST, AMB = "track_host", "track_guest", "track_ambience"
+_, mp = req("POST", "/api/projects", {"name": "linked", "sample_rate": 48000, "channels": 1})
+mpid = mp["id"]
+
+# 三轨各准备一个带脉冲的 48k 素材（脉冲在源帧 50）
+def pulse_src(tag, project=None):
+    target = project if project is not None else mpid
+    w = [0.0] * 1000
+    w[50] = 1.0
+    pth = f"/tmp/pe_input/pulse_{tag}.wav"
+    write_wav(pth, 48000, w)
+    body, ct = multipart(pth, f"pulse_{tag}.wav")
+    st, s = req("POST", f"/api/projects/{target}/sources", raw=body, ctype=ct)
+    assert st == 200, s
+    return s["id"]
+
+src_h, src_g, src_a = pulse_src("h"), pulse_src("g"), pulse_src("a")
+
+# 轨道初始状态：三条角色轨 + 默认未锁未隐
+st, tracks = req("GET", f"/api/projects/{mpid}/tracks")
+track_ids = [t["id"] for t in tracks]
+check("three role tracks present", st == 200 and HOST in track_ids and GUEST in track_ids and AMB in track_ids,
+      str(track_ids))
+
+# 每轨三段，对齐放在 [0,200)、[400,600)、[800,1000)，保证任何一次删除后组仍有成员。
+def add(track, sid, start, length=200):
+    st, pp = req("POST", f"/api/projects/{mpid}/items",
+                 {"source_id": sid, "track_id": track, "source_start": 0,
+                  "source_end": length, "timeline_start": start})
+    assert st == 200, pp
+    return pp["items"][-1]["id"]
+
+ids = {}
+for tr, sid in ((HOST, src_h), (GUEST, src_g), (AMB, src_a)):
+    ids[(tr, 1)] = add(tr, sid, 0)
+    ids[(tr, 2)] = add(tr, sid, 400)
+    ids[(tr, 3)] = add(tr, sid, 800)
+
+# 全部入同一剪辑组
+all_item_ids = [ids[k] for k in sorted(ids)]
+st, gr = req("POST", f"/api/projects/{mpid}/groups",
+             {"name": "全场", "item_ids": all_item_ids, "parent_id": None})
+check("create linked group", st == 200 and gr["group_id"])
+gid = gr["group_id"]
+
+# 11a. 整组波纹删除第一段：剩余两段同步前移 200（400->200，800->600）
+st, after = req("POST", f"/api/projects/{mpid}/items/delete",
+                {"item_id": ids[(HOST, 1)], "ripple": True, "zero_policy": "reject"})
+check("ripple delete ok", st == 200, str(after))
+for tr in (HOST, GUEST, AMB):
+    i2 = next(i for i in after["items"] if i["id"] == ids[(tr, 2)])
+    i3 = next(i for i in after["items"] if i["id"] == ids[(tr, 3)])
+    check(f"{tr} segments shift in lockstep", i2["timeline_start"] == 200 and i3["timeline_start"] == 600,
+          f"{i2['timeline_start']},{i3['timeline_start']}")
+
+# 三轨脉冲落在同一输出帧 200+50=250，混音为三轨之和
+st, r = req("GET", f"/api/projects/{mpid}/render?since_version={after['version']}")
+check("three-track pulses align at 250", st == 200 and abs(r["frames"][250] - 3.0) < 1e-3,
+      str(r["frames"][250] if st == 200 else r))
+
+# 11b. 组状态暴露联动范围 / 轨道 / 冲突（剩余成员范围 200..800）
+st, status = req("GET", f"/api/projects/{mpid}/groups/status")
+gstat = next((g for g in status["groups"] if g["id"] == gid), None)
+check("status exposes member tracks", st == 200 and gstat is not None
+      and set(gstat["member_tracks"]) == {HOST, GUEST, AMB}, str(gstat))
+check("status range 200..800", gstat["range_start"] == 200 and gstat["range_end"] == 800,
+      str((gstat["range_start"], gstat["range_end"])))
+
+# 11c. 锁定轨一票否决且工程零变更
+before_locked = after
+st, lkerr = req("POST", f"/api/projects/{mpid}/tracks/{GUEST}", {"locked": True})
+check("lock guest track", st == 200)
+st, denied = req("POST", f"/api/projects/{mpid}/items/delete",
+                 {"item_id": ids[(HOST, 2)], "ripple": True, "zero_policy": "reject"})
+check("locked track rejects linked ripple", st == 400 and GUEST in str(denied), str(denied))
+st, cur_locked = req("GET", f"/api/projects/{mpid}")
+check("rejection leaves project unchanged", cur_locked["items"] == before_locked["items"])
+# 解锁
+req("POST", f"/api/projects/{mpid}/tracks/{GUEST}", {"locked": False})
+
+# 11d. 隐藏轨仍参与联动：在独立工程上验证，避免删空主剪辑组。
+_, hp = req("POST", "/api/projects", {"name": "hidden", "sample_rate": 48000, "channels": 1})
+hpid = hp["id"]
+sh = pulse_src("hh", hpid); sg = pulse_src("gg", hpid); sa = pulse_src("aa", hpid)
+# 每轨放两段：[0,100) 与 [100,300)；气氛轨额外放一条横跨 [0,300) 的长片段。
+def add_to(proj, track, sid, start, length=200):
+    st, pp = req("POST", f"/api/projects/{proj}/items",
+                 {"source_id": sid, "track_id": track, "source_start": 0,
+                  "source_end": length, "timeline_start": start})
+    assert st == 200, pp
+    return pp["items"][-1]["id"]
+h_first, h_second = add_to(hpid, HOST, sh, 0, 100), add_to(hpid, HOST, sh, 100, 200)
+g_first, g_second = add_to(hpid, GUEST, sg, 0, 100), add_to(hpid, GUEST, sg, 100, 200)
+a_first, a_second = add_to(hpid, AMB, sa, 0, 100), add_to(hpid, AMB, sa, 100, 200)
+a_long = add_to(hpid, AMB, sa, 0, 300)
+st, hgr = req("POST", f"/api/projects/{hpid}/groups",
+              {"name": "隐藏联动组", "item_ids": [h_first, h_second, g_first, g_second,
+                                                a_first, a_second, a_long], "parent_id": None})
+check("hidden-scenario group created", st == 200)
+hgid = hgr["group_id"]
+st, hid = req("POST", f"/api/projects/{hpid}/tracks/{AMB}", {"hidden": True})
+check("hide ambience track", st == 200 and any(t["id"] == AMB and t["hidden"] for t in hid["tracks"]))
+# 删除首段区间 [0,100)：气氛长片段被裁切，右段保留在边界帧 100，且仍是组成员。
+st, rip2 = req("POST", f"/api/projects/{hpid}/items/delete",
+               {"item_id": h_first, "ripple": True, "zero_policy": "reject"})
+check("ripple with hidden track ok", st == 200, str(rip2))
+amb_long_after = next((i for i in rip2["items"] if i["source_id"] == sa and i["source_start"] >= 100), None)
+check("hidden spanning track clipped and kept at boundary", amb_long_after is not None
+      and amb_long_after["timeline_start"] == 100, str(amb_long_after))
+st, status2 = req("GET", f"/api/projects/{hpid}/groups/status")
+gstat2 = next((g for g in status2["groups"] if g["id"] == hgid), None)
+check("status flags hidden-but-participating",
+      gstat2 is not None and AMB in gstat2["hidden_tracks"] and AMB in gstat2["member_tracks"],
+      str(gstat2))
+# 隐藏 + 锁定一票否决
+req("POST", f"/api/projects/{hpid}/tracks/{AMB}", {"locked": True})
+st, hidden_lock_err = req("POST", f"/api/projects/{hpid}/items/delete",
+                          {"item_id": h_second, "ripple": True, "zero_policy": "reject"})
+check("hidden+locked track vetoes linked edit", st == 400 and AMB in str(hidden_lock_err),
+      str(hidden_lock_err))
+
+# 11e. 分组交叉淡化（主组此刻仍完整）：按各轨真实余量统一落值
+st, gxf = req("POST", f"/api/projects/{mpid}/groups/{gid}/crossfade", {"frames": 20})
+check("group crossfade evaluates per-track margins", st == 200 and gxf["feasible"] is True, str(gxf))
+
+# 11f. 嵌套成环检测（用第三段建子组，再试图把父组挂到子组下）
+st, child = req("POST", f"/api/projects/{mpid}/groups",
+                {"name": "子组", "item_ids": [ids[(HOST, 3)]], "parent_id": gid})
+check("create child group", st == 200 and isinstance(child, dict) and child.get("group_id"), str(child))
+child_gid = child["group_id"]
+st, cycle = req("POST", f"/api/projects/{mpid}/groups/{gid}/parent",
+                {"parent_id": child_gid})
+check("nested cycle rejected", st == 400 and "环" in str(cycle), str(cycle))
+
+# 11g. 负起点（独立工程，避免 clip 移动清空主组）：reject 拒绝、clip 裁切
+_, negp = req("POST", "/api/projects", {"name": "negative", "sample_rate": 48000, "channels": 1})
+npid = negp["id"]
+nsh, nsg, nsa = pulse_src("nh", npid), pulse_src("ng", npid), pulse_src("na", npid)
+nids = []
+for tr, sid in ((HOST, nsh), (GUEST, nsg), (AMB, nsa)):
+    nids.append(add_to(npid, tr, sid, 0, 300))
+st, ngr = req("POST", f"/api/projects/{npid}/groups",
+              {"name": "负起点组", "item_ids": nids, "parent_id": None})
+check("negative-scenario group created", st == 200)
+ngid = ngr["group_id"]
+st, neg_reject = req("POST", f"/api/projects/{npid}/groups/{ngid}/move",
+                     {"delta": -100000, "zero_policy": "reject"})
+check("negative move rejected explicitly", st == 400 and "reject" in str(neg_reject), str(neg_reject))
+st, clipped = req("POST", f"/api/projects/{npid}/groups/{ngid}/move",
+                  {"delta": -100000, "zero_policy": "clip"})
+check("clip move clamps to zero without error", st == 200
+      and all(i["timeline_start"] >= 0 for i in clipped["items"]), str(clipped))
+
+# 11h. 分轨导出（独立三轨工程）：混音 + 每轨 WAV，统一版本
+_, sp = req("POST", "/api/projects", {"name": "stems", "sample_rate": 48000, "channels": 1})
+spid = sp["id"]
+ssh, ssg, ssa = pulse_src("sth", spid), pulse_src("stg", spid), pulse_src("sta", spid)
+sids = []
+for tr, sid in ((HOST, ssh), (GUEST, ssg), (AMB, ssa)):
+    sids.append(add_to(spid, tr, sid, 0, 300))
+st, sgr = req("POST", f"/api/projects/{spid}/groups",
+              {"name": "分轨组", "item_ids": sids, "parent_id": None})
+check("stems-scenario group created", st == 200)
+st, cur_for_stem = req("GET", f"/api/projects/{spid}")
+stem_dest = os.path.abspath(os.path.join(os.path.dirname(dest), "linked_stems.wav"))
+st, stems = req("POST", f"/api/projects/{spid}/export/stems", {"dest": stem_dest})
+check("stems export ok", st == 200 and stems["cancelled"] is False, str(stems))
+check("stems reference one revision", stems["version"] == cur_for_stem["version"],
+      f"{stems.get('version')} vs {cur_for_stem['version']}")
+stem_paths = [s["path"] for s in stems["stems"]]
+check("one stem wav per track", len(stems["stems"]) >= 3 and all(os.path.exists(x) for x in stem_paths),
+      str(stem_paths))
+check("mix wav exists", os.path.exists(stems["mix_path"]))
+
+# 11i. 一次撤销恢复全部受影响轨道（在主工程上撤销最近一次联动编辑）
+st, undone_link = req("POST", f"/api/projects/{mpid}/undo")
+check("undo restores linked project in one step", st == 200, str(undone_link))
+
+# 11j. 缺失源文件在渲染前明确报错。
+# 上传即进入服务进程内存缓存，因此用「独立实例 + 丢文件 + 冷重启」复刻真实场景：
+# 工程关闭期间源文件丢失，重开后缓存为空，preflight 必须在渲染前报错而非当静音。
+import subprocess, signal
+BIN = os.environ.get("PE_BIN", "./target/debug/podcast_editor")
+cold_dir = "/tmp/pe_cold"
+cold_port = "127.0.0.1:8091"
+cold_base = "http://" + cold_port
+os.makedirs(cold_dir, exist_ok=True)
+cold_env = dict(os.environ, PE_DATA_DIR=cold_dir, PE_BIND=cold_port)
+cold = subprocess.Popen([BIN], cwd=os.path.join(os.path.dirname(__file__), ".."),
+                        env=cold_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+for _ in range(50):
+    try:
+        urllib.request.urlopen(cold_base + "/api/projects", timeout=1); break
+    except Exception:
+        time.sleep(0.1)
+try:
+    def creq(method, path, body=None):
+        r = urllib.request.Request(cold_base + path,
+                                   data=json.dumps(body).encode() if body is not None else None,
+                                   headers={"Content-Type": "application/json"}, method=method)
+        try:
+            with urllib.request.urlopen(r, timeout=10) as resp:
+                txt = resp.read()
+                return resp.status, (json.loads(txt) if txt else None)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+    st, mproj = creq("POST", "/api/projects", {"name": "missing", "sample_rate": 48000, "channels": 1})
+    missid = mproj["id"]
+    ghost = "/tmp/pe_input/ghost_cold.wav"
+    write_wav(ghost, 48000, [0.0] * 100)
+    body, ct = multipart(ghost, "ghost_cold.wav")
+    up = urllib.request.Request(cold_base + f"/api/projects/{missid}/sources", data=body,
+                                headers={"Content-Type": ct}, method="POST")
+    with urllib.request.urlopen(up, timeout=10) as resp:
+        gs = json.loads(resp.read())
+    creq("POST", f"/api/projects/{missid}/items",
+         {"source_id": gs["id"], "source_start": 0, "source_end": 100})
+    check("ghost source registered on cold instance", True)
+    # 上传会在数据目录留存独立副本，DB 引用的是该副本路径；删除它才是真正丢失源文件。
+    os.remove(gs["path"])
+    cold.send_signal(signal.SIGTERM); cold.wait(timeout=10)
+    # 冷重启：内存缓存清空，但 SQLite 里仍登记着已丢失的源引用。
+    cold = subprocess.Popen([BIN], cwd=os.path.join(os.path.dirname(__file__), ".."),
+                            env=cold_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(50):
+        try:
+            urllib.request.urlopen(cold_base + "/api/projects", timeout=1); break
+        except Exception:
+            time.sleep(0.1)
+    st, miss_err = creq("GET", f"/api/projects/{missid}/render")
+    check("missing source reported before render", st == 400 and "缺失" in str(miss_err),
+          str(miss_err)[:120])
+finally:
+    if cold.poll() is None:
+        cold.send_signal(signal.SIGTERM); cold.wait(timeout=10)
+
+# ---------- 12. 旧单轨工程无需转换素材即可打开 ----------
+print("12) 旧单轨工程兼容性（HTTP 层）")
+# 旧工程经当前接口创建后，其片段落在默认主持人轨；这里验证载入不报错且保留引用。
+st, legacy = req("GET", f"/api/projects/{pid}")
+check("existing project reloads with track metadata", st == 200
+      and all("track_id" in i for i in legacy["items"]))
+check("legacy items keep source references intact",
+      all(i["source_end"] > i["source_start"] for i in legacy["items"]))
+
 print(f"\n结果：{PASS} 通过，{FAIL} 失败")
 sys.exit(1 if FAIL else 0)

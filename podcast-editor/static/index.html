@@ -3,10 +3,11 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>访谈播客剪辑台</title>
+<title>访谈播客剪辑台 · 多轨联动</title>
 <style>
   :root { --bg:#14161a; --panel:#1d2127; --line:#2b313a; --fg:#e6e9ee; --mut:#8a93a0;
-          --accent:#5aa2ff; --warn:#ffb454; --ok:#58d68d; --danger:#ff6b6b; }
+          --accent:#5aa2ff; --warn:#ffb454; --ok:#58d68d; --danger:#ff6b6b;
+          --host:#5aa2ff; --guest:#58d68d; --amb:#ffb454; --legacy:#b08cff; }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--fg);
          font:13px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; }
@@ -19,8 +20,9 @@
   button:hover { border-color:var(--accent); }
   button.primary { background:var(--accent); border-color:var(--accent); color:#081322; font-weight:600; }
   button.danger { color:var(--danger); }
+  button.mini { padding:3px 8px; font-size:12px; }
   button:disabled { opacity:.4; cursor:not-allowed; }
-  .wrap { display:grid; grid-template-columns:300px 1fr; gap:12px; padding:12px; height:calc(100vh - 56px); }
+  .wrap { display:grid; grid-template-columns:320px 1fr; gap:12px; padding:12px; height:calc(100vh - 56px); }
   .col { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; overflow:auto; }
   .field { margin-bottom:10px; }
   label { display:block; color:var(--mut); margin-bottom:4px; font-size:12px; }
@@ -42,27 +44,64 @@
   #msg { min-height:20px; font-size:12px; }
   #msg.warn { color:var(--warn); } #msg.err { color:var(--danger); } #msg.ok { color:var(--ok); }
   .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-  .srcview { margin-top:10px; }
+  .grid3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
   .muted { color:var(--mut); }
   .xfbox { border:1px solid var(--line); border-radius:6px; padding:8px; margin-top:8px; }
   .xfbox .avail { color:var(--warn); font-size:12px; }
+
+  /* 轨道 */
+  .trackcard { border:1px solid var(--line); border-left-width:4px; border-radius:6px;
+               padding:8px; margin-bottom:8px; background:#171b21; }
+  .trackcard.locked { border-left-color:var(--danger); }
+  .trackcard.hidden { opacity:.55; }
+  .trackcard .head { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+  .trackcard .head b { flex:1; }
+  .trackcard .toggles { display:flex; gap:6px; align-items:center; }
+  .trackcard .toggles button.on { border-color:var(--warn); color:var(--warn); }
+  .trackcard .toggles button.lk { border-color:var(--line); }
+  .trackcard .toggles button.lk.on { border-color:var(--danger); color:var(--danger); }
+  .trackcard input[type=number] { padding:3px 6px; }
+  .dot { width:9px; height:9px; border-radius:50%; display:inline-block; }
+
+  /* 剪辑组 */
+  .groupcard { border:1px solid var(--line); border-radius:6px; padding:8px; margin-bottom:8px; background:#171b21; }
+  .groupcard .grange { color:var(--accent); font-size:12px; margin:4px 0; }
+  .chips { display:flex; gap:4px; flex-wrap:wrap; margin:4px 0; }
+  .chip { font-size:11px; padding:1px 7px; border-radius:999px; border:1px solid var(--line); }
+  .chip.lock { color:var(--danger); border-color:var(--danger); }
+  .chip.hide { color:var(--warn); border-color:var(--warn); }
+  .conflict { color:var(--danger); font-size:12px; margin-top:4px; }
+  .grouptools { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
+
+  /* 多轨泳道 */
+  .lane { position:relative; height:46px; border:1px solid var(--line); border-radius:6px;
+          margin-bottom:6px; background:#0f1216; overflow:hidden; }
+  .lane .label { position:absolute; left:6px; top:4px; font-size:11px; z-index:2;
+                 background:rgba(0,0,0,.45); padding:1px 6px; border-radius:4px; }
+  .lane.hidden-lane { display:none; }
+  .clip { position:absolute; top:18px; height:22px; border-radius:4px; font-size:10px;
+          padding:2px 4px; overflow:hidden; white-space:nowrap; cursor:pointer; border:1px solid rgba(255,255,255,.25); }
+  .clip.sel { outline:2px solid #fff; }
+  .clip.neg { border-style:dashed; }
+  .zero-mark { position:absolute; top:0; bottom:0; width:1px; background:var(--danger); z-index:1; }
 </style>
 </head>
 <body>
 <header>
-  <h1>访谈播客剪辑台</h1>
+  <h1>访谈播客剪辑台 · 多轨联动</h1>
   <span class="pill" id="ratePill">工程：未创建</span>
   <span class="pill" id="verPill">版本 -</span>
   <span class="pill" id="stalePill" style="display:none">波形已过期</span>
   <div style="flex:1"></div>
   <button id="undoBtn">撤销</button>
   <button id="redoBtn">重做</button>
-  <button id="exportBtn" class="primary">导出 WAV</button>
+  <button id="exportStemsBtn">导出分轨</button>
+  <button id="exportBtn" class="primary">导出混音 WAV</button>
   <button id="cancelExportBtn" class="danger" disabled>取消导出</button>
 </header>
 
 <div class="wrap">
-  <!-- 左栏：工程/素材/片段 -->
+  <!-- 左栏 -->
   <div class="col">
     <h2>工程</h2>
     <div class="grid2">
@@ -70,72 +109,80 @@
       <div class="field"><label>工程采样率（时间基准）</label>
         <select id="prate"><option>48000</option><option>44100</option><option>24000</option></select></div>
     </div>
-    <button id="createBtn" class="primary" style="width:100%">新建工程</button>
+    <button id="createBtn" class="primary" style="width:100%">新建工程（主持人/嘉宾/气氛三轨）</button>
+
+    <h2>轨道（锁/隐/录音偏移）</h2>
+    <div id="trackList"></div>
+    <div class="tag">隐藏轨仍参与剪辑组联动；锁定轨对任何改动一票否决。</div>
 
     <h2>原始素材（只读引用）</h2>
-    <div class="field">
-      <input type="file" id="fileInput" accept=".wav" disabled />
+    <div class="field"><input type="file" id="fileInput" accept=".wav" disabled /></div>
+    <div class="grid3">
+      <button id="sigSpeech" disabled>语音节奏</button>
+      <button id="sigPulse" disabled>单脉冲</button>
+      <button id="sigSine" disabled>相位正弦</button>
     </div>
-    <div class="row">
-      <button id="sigSpeech" disabled>生成语音节奏</button>
-      <button id="sigPulse" disabled>生成单脉冲</button>
-      <button id="sigSine" disabled>生成相位正弦</button>
-    </div>
-    <ul class="items" id="srcList"></ul>
-    <div class="tag">原录音永不被覆盖；编辑只保存引用的帧范围。</div>
+    <ul class="items" id="srcList" style="margin-top:8px"></ul>
 
-    <h2>时间线片段</h2>
+    <h2>加入片段</h2>
     <div class="field">
-      <label>用所选素材加入片段（源帧范围）</label>
-      <div class="grid2">
-        <input id="addStart" type="number" value="0" />
-        <input id="addEnd" type="number" value="0" />
-      </div>
+      <label>目标轨道</label>
+      <select id="addTrack"></select>
     </div>
+    <div class="grid2">
+      <div class="field"><label>源帧起点</label><input id="addStart" type="number" value="0" /></div>
+      <div class="field"><label>源帧终点(不含)</label><input id="addEnd" type="number" value="0" /></div>
+    </div>
+    <div class="field"><label>时间线起点（工程帧，可负；留空=接该轨末尾）</label>
+      <input id="addPos" type="number" placeholder="留空自动追加" /></div>
     <button id="addItemBtn" style="width:100%" disabled>加入片段</button>
-    <ul class="items" id="itemList" style="margin-top:8px"></ul>
 
-    <h2>保留静音 / 顺序</h2>
+    <h2>保留静音 / 同轨顺序</h2>
     <div class="row">
       <input id="silLen" type="number" value="2400" />
       <button id="silBtn" disabled>插入静音(帧)</button>
     </div>
     <div class="row" style="margin-top:6px">
-      <button id="upBtn" disabled>上移</button>
-      <button id="downBtn" disabled>下移</button>
+      <button id="upBtn" disabled>同轨上移</button>
+      <button id="downBtn" disabled>同轨下移</button>
     </div>
   </div>
 
-  <!-- 右栏：波形与预览 -->
+  <!-- 右栏 -->
   <div class="col">
     <div class="canvasbar">
       <button id="zoomOut">－</button>
       <span class="pill" id="zoomPill">每桶 256 帧</span>
       <button id="zoomIn">＋</button>
       <span style="flex:1"></span>
-      <span class="tag">时间线总长度：<b id="totalLen">-</b> 工程帧</span>
+      <span class="tag">时间线长度：<b id="totalLen">-</b> 工程帧</span>
       <button id="refreshWave">刷新波形</button>
     </div>
-    <canvas id="tlCanvas" height="180"></canvas>
-    <div class="canvasbar" style="margin-top:10px">
+
+    <h2>多轨时间线（点击片段选中；红色虚线为工程零点）</h2>
+    <div id="lanes"></div>
+
+    <div class="canvasbar" style="margin-top:6px">
       <span class="tag">试听游标（工程帧）：<b id="curFrame">0</b></span>
       <button id="locateSrc">游标 → 原素材位置</button>
       <span class="tag" id="locateOut">—</span>
     </div>
+    <canvas id="tlCanvas" height="150"></canvas>
 
     <h2>选中片段操作</h2>
+    <div id="selMeta" class="tag" style="margin-bottom:6px">未选中片段</div>
     <div class="grid2">
       <div class="field"><label>截取起点（源帧）</label><input id="trimStart" type="number" /></div>
       <div class="field"><label>截取终点（源帧，不含）</label><input id="trimEnd" type="number" /></div>
     </div>
     <div class="row">
-      <button id="trimBtn" disabled>截取（只改引用）</button>
+      <button id="trimBtn" disabled>单轨截取（不动他轨）</button>
       <button id="splitBtn" disabled>在该源帧切分</button>
       <input id="splitAt" type="number" placeholder="切分源帧" />
     </div>
 
     <div class="xfbox">
-      <label>与下一片段的交叉淡化（工程帧，需两侧真实余量）</label>
+      <label>与同轨下一片段的交叉淡化（工程帧，按各轨真实余量校验）</label>
       <div class="row">
         <input id="xfFrames" type="number" value="0" />
         <button id="xfBtn" disabled>设置交叉淡化</button>
@@ -143,8 +190,26 @@
       <div class="avail" id="xfAvail">选择片段后显示可用长度</div>
     </div>
 
+    <h2>联动删除（剪辑组整组波纹 / 单轨波纹）</h2>
+    <div class="grid3">
+      <label style="flex:1">零点策略
+        <select id="zeroPolicy"><option value="reject">reject 整单拒绝</option><option value="clip">clip 裁到零点</option></select>
+      </label>
+      <button id="deletePlainBtn" class="danger" disabled>非波纹删除</button>
+      <button id="deleteRippleBtn" class="danger" disabled>波纹删除</button>
+    </div>
+
+    <h2>剪辑组（联动范围 / 锁定轨 / 隐藏轨 / 冲突）</h2>
+    <div class="row">
+      <input id="groupName" placeholder="新剪辑组名称" />
+      <button id="createGroupBtn" disabled>用选中片段建组</button>
+      <button id="refreshStatusBtn">刷新组状态</button>
+    </div>
+    <div id="groupList" style="margin-top:8px"></div>
+    <div class="tag">建组后可在卡片内整组移动、设置分组交叉淡化、嵌套父组。</div>
+
     <h2>原素材波形（点击定位源帧）</h2>
-    <canvas id="srcCanvas" height="120" class="srcview"></canvas>
+    <canvas id="srcCanvas" height="110"></canvas>
     <div class="tag" id="srcInfo">—</div>
 
     <h2>试听（预览渲染，与导出同一渲染路径）</h2>
@@ -159,10 +224,14 @@
 
 <script>
 const $ = id => document.getElementById(id);
+const TRACK_COLOR = { track_host:"var(--host)", track_guest:"var(--guest)",
+                      track_ambience:"var(--amb)", track_legacy:"var(--legacy)" };
+const ROLE_LABEL = { track_host:"主持人", track_guest:"嘉宾", track_ambience:"现场气氛", track_legacy:"旧单轨" };
 let state = {
-  project:null, sources:[], items:[], selectedItem:null, selectedSource:null,
+  project:null, sources:[], items:[], tracks:[], groups:[], statuses:[],
+  selectedItem:null, selectedSource:null,
   bucketFrames:256, waveVersion:null, cursor:0, previewUrl:null,
-  exportJob:null, srcBuckets:null, tlBuckets:null,
+  srcBuckets:null, tlBuckets:null,
 };
 
 function msg(text, kind="") { const m=$("msg"); m.textContent=text; m.className=kind; }
@@ -171,28 +240,33 @@ async function api(path, opts={}) {
   if (!res.ok) throw new Error((await res.text()) || res.statusText);
   return res.status===200 ? res.json() : null;
 }
-function setStale(stale) {
-  $("stalePill").style.display = stale ? "inline-block" : "none";
+function pid() { return state.project.id; }
+function setStale(stale) { $("stalePill").style.display = stale ? "inline-block" : "none"; }
+function trackById(t){ return state.tracks.find(x=>x.id===t); }
+function itemLen(it){
+  const src = state.sources.find(s=>s.id===it.source_id);
+  const sr = src ? src.original_rate : state.project.sample_rate;
+  return Math.round((it.source_end-it.source_start) * state.project.sample_rate / sr);
 }
+function timelineBounds(){
+  let lo=0, hi=0;
+  for (const it of state.items){
+    lo=Math.min(lo, it.timeline_start);
+    hi=Math.max(hi, it.timeline_start + itemLen(it));
+  }
+  return { lo, hi, span:Math.max(1, hi-lo) };
+}
+function timelineTotal(){ return Math.max(0, timelineBounds().hi); }
+
 function syncProject(p) {
   state.project = p; state.items = p.items || [];
+  state.tracks = p.tracks || []; state.groups = p.groups || [];
   $("verPill").textContent = "版本 " + p.version;
   $("ratePill").textContent = "工程：" + p.sample_rate + " Hz / " + p.channels + " 声道";
   $("totalLen").textContent = timelineTotal();
   setStale(false);
-  renderItemList();
-  loadWaveform();
-}
-function timelineTotal() {
-  // 仅用于展示；权威长度以后端渲染 frame_count 为准。
-  let end = 0;
-  for (const it of state.items) {
-    const src = state.sources.find(s=>s.id===it.source_id);
-    const sr = src ? src.original_rate : state.project.sample_rate;
-    const len = Math.round((it.source_end-it.source_start) * state.project.sample_rate / sr);
-    end = Math.max(end, it.timeline_start + len);
-  }
-  return end;
+  renderTracks(); renderAddTrackOptions(); renderItemList(); renderLanes();
+  loadWaveform(); refreshStatuses();
 }
 
 // ---------- 工程 ----------
@@ -201,14 +275,15 @@ $("createBtn").onclick = async () => {
     name:$("pname").value, sample_rate:+$("prate").value, channels:1 })});
   state.sources=[]; state.items=[]; state.selectedItem=null; state.selectedSource=null;
   ["fileInput","addItemBtn","silBtn","upBtn","downBtn","trimBtn","splitBtn","xfBtn",
-   "previewBtn","sigSpeech","sigPulse","sigSine"].forEach(id=>$(id).disabled=false);
+   "previewBtn","sigSpeech","sigPulse","sigSine","createGroupBtn",
+   "deletePlainBtn","deleteRippleBtn"].forEach(id=>$(id).disabled=false);
   await refreshSources();
   syncProject(p);
-  msg("工程已创建，采样率即全工程时间基准（位置均为采样帧整数）。","ok");
+  msg("工程已创建：主持人/嘉宾/现场气氛三轨，位置均为采样帧整数。","ok");
 };
 
 async function refreshSources() {
-  state.sources = await api(`/api/projects/${state.project.id}/sources`);
+  state.sources = await api(`/api/projects/${pid()}/sources`);
   const ul=$("srcList"); ul.innerHTML="";
   for (const s of state.sources) {
     const li=document.createElement("li");
@@ -219,194 +294,344 @@ async function refreshSources() {
   }
 }
 
-// ---------- 素材上传 / 测试信号 ----------
+// ---------- 素材 ----------
 $("fileInput").onchange = async e => {
   const f = e.target.files[0]; if (!f) return;
   const fd = new FormData(); fd.append("file", f);
-  const res = await fetch(`/api/projects/${state.project.id}/sources`, { method:"POST", body:fd });
+  const res = await fetch(`/api/projects/${pid()}/sources`, { method:"POST", body:fd });
   if (!res.ok) return msg("上传失败：" + await res.text(), "err");
   await refreshSources();
-  const p = await api(`/api/projects/${state.project.id}`); syncProject(p);
+  syncProject(await api(`/api/projects/${pid()}`));
   msg("素材已登记为只读引用，原始文件未被修改。","ok");
 };
 async function makeSignal(kind, param) {
   const r = await api("/api/test-signal", { method:"POST",
     body:JSON.stringify({ kind, sample_rate:state.project.sample_rate, frames:48000, param })});
-  // 信号已由后端写入数据目录，登记为只读素材（复用统一入库路径）。
-  const res = await fetch(`/api/projects/${state.project.id}/sources/register`, {
+  const res = await fetch(`/api/projects/${pid()}/sources/register`, {
     method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ path:r.path, name:kind+".wav" })
-  });
+    body: JSON.stringify({ path:r.path, name:kind+".wav" }) });
   if (!res.ok) return msg("信号登记失败：" + await res.text(),"err");
   await refreshSources();
-  const p = await api(`/api/projects/${state.project.id}`); syncProject(p);
+  syncProject(await api(`/api/projects/${pid()}`));
   msg("测试信号已生成并登记。","ok");
 }
 $("sigSpeech").onclick=()=>makeSignal("speech",2400);
 $("sigPulse").onclick=()=>makeSignal("pulse",1200);
 $("sigSine").onclick=()=>makeSignal("sine",440);
 
+// ---------- 轨道面板 ----------
+function renderTracks() {
+  const box=$("trackList"); box.innerHTML="";
+  for (const t of state.tracks) {
+    const card=document.createElement("div");
+    card.className="trackcard" + (t.locked?" locked":"") + (t.hidden?" hidden":"");
+    card.style.borderLeftColor = TRACK_COLOR[t.id] || "var(--accent)";
+    card.innerHTML = `
+      <div class="head">
+        <span class="dot" style="background:${TRACK_COLOR[t.id]||'var(--accent)'}"></span>
+        <b>${t.name}</b>
+        <span class="toggles">
+          <button class="mini ${t.hidden?'on':''}" data-act="hide">${t.hidden?'已隐':'隐藏'}</button>
+          <button class="mini lk ${t.locked?'on':''}" data-act="lock">${t.locked?'已锁':'锁定'}</button>
+        </span>
+      </div>
+      <div class="grid2">
+        <label>录音起点偏移(帧，可负)
+          <input type="number" value="${t.start_offset}" data-act="offset"></label>
+        <label>&nbsp;<button class="mini" style="width:100%" data-act="applyOffset">应用偏移</button></label>
+      </div>`;
+    card.querySelector('[data-act="hide"]').onclick=()=>updateTrack(t.id,{hidden:!t.hidden});
+    card.querySelector('[data-act="lock"]').onclick=()=>updateTrack(t.id,{locked:!t.locked});
+    card.querySelector('[data-act="applyOffset"]').onclick=()=>{
+      const v=+card.querySelector('[data-act="offset"]').value;
+      updateTrack(t.id,{start_offset:v});
+    };
+    box.appendChild(card);
+  }
+}
+async function updateTrack(tid, body) {
+  try { syncProject(await api(`/api/projects/${pid()}/tracks/${tid}`,{method:"POST",body:JSON.stringify(body)}));
+    msg("轨道状态已更新（一次快照，可整单撤销）。","ok");
+  } catch(e){ msg(e.message,"err"); }
+}
+function renderAddTrackOptions(){
+  const sel=$("addTrack"); const cur=sel.value;
+  sel.innerHTML = state.tracks.map(t=>`<option value="${t.id}">${t.name}</option>`).join("");
+  if (cur) sel.value=cur;
+}
+
 // ---------- 片段 ----------
 $("addItemBtn").onclick = async () => {
   if (!state.selectedSource) return msg("请先选择一个素材。","warn");
-  const p = await api(`/api/projects/${state.project.id}/items`, { method:"POST", body:JSON.stringify({
-    source_id:state.selectedSource.id, source_start:+$("addStart").value, source_end:+$("addEnd").value })});
-  syncProject(p); msg("片段已加入（引用范围，未改动原录音）。","ok");
+  const posRaw=$("addPos").value;
+  const body={ source_id:state.selectedSource.id, track_id:$("addTrack").value,
+    source_start:+$("addStart").value, source_end:+$("addEnd").value };
+  if (posRaw!=="") body.timeline_start=+posRaw;
+  try { syncProject(await api(`/api/projects/${pid()}/items`,{method:"POST",body:JSON.stringify(body)}));
+    msg("片段已加入（引用范围，未改动原录音）。","ok");
+  } catch(e){ msg(e.message,"err"); }
 };
 function renderItemList() {
-  const ul=$("itemList"); ul.innerHTML="";
-  state.items.forEach((it,idx)=>{
-    const src=state.sources.find(s=>s.id===it.source_id);
-    const li=document.createElement("li");
-    if (state.selectedItem && state.selectedItem.id===it.id) li.classList.add("sel");
-    li.innerHTML=`<b>#${idx+1} 片段 ${it.id.slice(-6)}</b><br>
-      <small>素材 ${it.source_id.slice(-6)} · 源帧 ${it.source_start}…${it.source_end}
-      · 时间线帧 ${it.timeline_start}${it.crossfade_out?(" · 淡化 "+it.crossfade_out):""}</small><br>
-      <small class="muted">${src?src.original_rate+"Hz":""} · 长度 ${it.source_end-it.source_start} 源帧</small>`;
-    li.onclick=()=>selectItem(it);
-    ul.appendChild(li);
-  });
+  // 列表信息合并进选中元数据；主可视化走泳道。
+  const it=state.selectedItem;
+  if (!it){ $("selMeta").textContent="未选中片段"; return; }
+  const t=trackById(it.track_id);
+  $("selMeta").innerHTML = `片段 <b>${it.id.slice(-6)}</b> · 轨道 ${t?t.name:it.track_id}
+    · 源帧 ${it.source_start}…${it.source_end} · 时间线帧 ${it.timeline_start}
+    · 工程长度 ${itemLen(it)} 帧${it.crossfade_out?(" · 淡化 "+it.crossfade_out):""}`;
 }
 function selectItem(it) {
   state.selectedItem=it;
   $("trimStart").value=it.source_start; $("trimEnd").value=it.source_end;
   $("xfFrames").value=it.crossfade_out; $("splitAt").value=it.source_start;
-  renderItemList(); updateXfAvail();
+  renderItemList(); renderLanes(); updateXfAvail();
 }
 $("trimBtn").onclick = async () => {
   const it=state.selectedItem; if(!it) return;
-  try {
-    const p = await api(`/api/projects/${state.project.id}/trim`,{method:"POST",body:JSON.stringify({
-      item_id:it.id, source_start:+$("trimStart").value, source_end:+$("trimEnd").value })});
-    syncProject(p); msg("已截取：仅引用范围改变，原录音完整保留。","ok");
+  try { syncProject(await api(`/api/projects/${pid()}/trim`,{method:"POST",body:JSON.stringify({
+      item_id:it.id, source_start:+$("trimStart").value, source_end:+$("trimEnd").value })}));
+    msg("已截取：仅引用范围改变，其他轨道工程位置原样保留。","ok");
   } catch(e){ msg(e.message,"err"); }
 };
 $("splitBtn").onclick = async () => {
   const it=state.selectedItem; if(!it) return;
-  try {
-    const p = await api(`/api/projects/${state.project.id}/split`,{method:"POST",body:JSON.stringify({
-      item_id:it.id, at_source_frame:+$("splitAt").value })});
-    syncProject(p); msg("已切分为两个连续引用。","ok");
+  try { syncProject(await api(`/api/projects/${pid()}/split`,{method:"POST",body:JSON.stringify({
+      item_id:it.id, at_source_frame:+$("splitAt").value })}));
+    msg("已切分；右片段继承同轨与剪辑组成员身份。","ok");
   } catch(e){ msg(e.message,"err"); }
 };
 $("upBtn").onclick=()=>move(-1);
 $("downBtn").onclick=()=>move(1);
 async function move(d) {
-  const idx=state.items.findIndex(i=>state.selectedItem && i.id===state.selectedItem.id);
-  const target=idx+d; if(idx<0||target<0||target>=state.items.length) return;
-  const p=await api(`/api/projects/${state.project.id}/reorder`,{method:"POST",
-    body:JSON.stringify({ item_id:state.selectedItem.id, target_index:target })});
-  syncProject(p);
+  const it=state.selectedItem; if(!it) return;
+  const sameTrack=state.items.filter(i=>i.track_id===it.track_id);
+  const idx=sameTrack.findIndex(i=>i.id===it.id);
+  const target=idx+d; if(target<0||target>=sameTrack.length) return;
+  try { syncProject(await api(`/api/projects/${pid()}/reorder`,{method:"POST",
+      body:JSON.stringify({ item_id:it.id, target_index:target })}));
+  } catch(e){ msg(e.message,"err"); }
 }
 $("silBtn").onclick = async () => {
-  const p=await api(`/api/projects/${state.project.id}/silence`,{method:"POST",
-    body:JSON.stringify({ length:+$("silLen").value })});
-  syncProject(p); msg("已插入显式静音（保留静音，非删除空隙）。","ok");
+  try { syncProject(await api(`/api/projects/${pid()}/silence`,{method:"POST",
+      body:JSON.stringify({ length:+$("silLen").value })}));
+    msg("已插入显式静音（保留静音，非删除空隙）。","ok");
+  } catch(e){ msg(e.message,"err"); }
 };
 
-// ---------- 交叉淡化 ----------
+// ---------- 多轨泳道 ----------
+function renderLanes() {
+  const wrap=$("lanes"); wrap.innerHTML="";
+  const { lo, span }=timelineBounds();
+  for (const t of state.tracks) {
+    const lane=document.createElement("div");
+    lane.className="lane"+(t.hidden?" hidden-lane":"");
+    lane.innerHTML=`<span class="label" style="color:${TRACK_COLOR[t.id]||'var(--accent)'}">${t.name}${t.locked?" 🔒":""}${t.hidden?" 🙈":""}</span>`;
+    // 工程零点标记
+    if (lo<0){ const z=document.createElement("div"); z.className="zero-mark";
+      z.style.left=((0-lo)/span*100)+"%"; lane.appendChild(z); }
+    for (const it of state.items.filter(i=>i.track_id===t.id)) {
+      const clip=document.createElement("div");
+      clip.className="clip"+(state.selectedItem&&state.selectedItem.id===it.id?" sel":"")+(it.timeline_start<0?" neg":"");
+      clip.style.background=(TRACK_COLOR[t.id]||"var(--accent)");
+      clip.style.left=((it.timeline_start-lo)/span*100)+"%";
+      clip.style.width=Math.max(1.5,(itemLen(it)/span*100))+"%";
+      clip.textContent=it.id.slice(-6)+(it.crossfade_out?(" xf"+it.crossfade_out):"");
+      clip.onclick=(e)=>{e.stopPropagation(); selectItem(it);};
+      lane.appendChild(clip);
+    }
+    wrap.appendChild(lane);
+  }
+}
+
+// ---------- 联动删除 ----------
+async function doDelete(ripple) {
+  const it=state.selectedItem; if(!it) return msg("请先在泳道选中片段。","warn");
+  try {
+    const p=await api(`/api/projects/${pid()}/items/delete`,{method:"POST",body:JSON.stringify({
+      item_id:it.id, ripple, zero_policy:$("zeroPolicy").value })});
+    state.selectedItem=null;
+    syncProject(p);
+    msg(ripple?"波纹删除完成：同组各轨一次快照统一移动，可一次撤销恢复。":"已非波纹删除：其他片段工程位置不变。","ok");
+  } catch(e){ msg(e.message,"err"); }
+}
+$("deletePlainBtn").onclick=()=>doDelete(false);
+$("deleteRippleBtn").onclick=()=>doDelete(true);
+
+// ---------- 交叉淡化（单片段，同轨相邻） ----------
 $("xfBtn").onclick = async () => {
   const it=state.selectedItem; if(!it) return;
   try {
-    const r=await api(`/api/projects/${state.project.id}/crossfade`,{method:"POST",
+    const r=await api(`/api/projects/${pid()}/crossfade`,{method:"POST",
       body:JSON.stringify({ item_id:it.id, frames:+$("xfFrames").value })});
     syncProject(r.project);
     if (r.margin && !r.margin.feasible)
-      msg(`素材到头：请求 ${r.margin.requested} 帧，但两侧真实余量最多 ${r.margin.max_feasible} 帧。`,"warn");
+      msg(`素材到头：请求 ${r.margin.requested} 帧，真实余量最多 ${r.margin.max_feasible} 帧。`,"warn");
     else msg("交叉淡化已设置；渲染前会再次校验真实余量。","ok");
     updateXfAvail();
   } catch(e){ msg(e.message,"err"); }
 };
 function updateXfAvail() {
   const it=state.selectedItem; if(!it){ $("xfAvail").textContent="选择片段后显示可用长度"; return; }
-  const idx=state.items.findIndex(i=>i.id===it.id); const next=state.items[idx+1];
-  if(!next){ $("xfAvail").textContent="这是最后一条片段，没有下一片段可做交叉淡化。"; return; }
+  const next=state.items.filter(i=>i.track_id===it.track_id && i.timeline_start>it.timeline_start)
+    .sort((a,b)=>a.timeline_start-b.timeline_start)[0];
+  if(!next){ $("xfAvail").textContent="这是该轨最后一条片段，没有同轨下一片段可做交叉淡化。"; return; }
   const curSrc=state.sources.find(s=>s.id===it.source_id);
   const nextSrc=state.sources.find(s=>s.id===next.source_id);
   const tail=Math.round((it.source_end-it.source_start)*state.project.sample_rate/curSrc.original_rate);
   const head=Math.round((next.source_end-next.source_start)*state.project.sample_rate/nextSrc.original_rate);
-  const max=Math.min(tail,head);
-  $("xfAvail").innerHTML = `当前尾部余量 <b>${tail}</b> 帧，下一片段头部余量 <b>${head}</b> 帧；
-    最大可行淡化 <b>${max}</b> 工程帧。超过会在渲染时被拒绝。`;
+  $("xfAvail").innerHTML = `尾部余量 <b>${tail}</b> 帧，下一片段头部余量 <b>${head}</b> 帧；
+    最大可行淡化 <b>${Math.min(tail,head)}</b> 工程帧（只在同轨相邻间成立）。`;
+}
+
+// ---------- 剪辑组 ----------
+$("createGroupBtn").onclick = async () => {
+  const it=state.selectedItem; if(!it) return msg("请先选中一个起始片段。","warn");
+  const name=$("groupName").value.trim() || "剪辑组";
+  try {
+    const r=await api(`/api/projects/${pid()}/groups`,{method:"POST",body:JSON.stringify({
+      name, item_ids:[it.id], parent_id:null })});
+    syncProject(r.project);
+    msg(`已建组「${name}」，可在卡片内继续加入选中片段。`,"ok");
+  } catch(e){ msg(e.message,"err"); }
+};
+$("refreshStatusBtn").onclick=refreshStatuses;
+async function refreshStatuses() {
+  if(!state.project) return;
+  try { const r=await api(`/api/projects/${pid()}/groups/status`);
+    state.statuses = r.groups || []; renderGroups();
+  } catch(e){ /* 状态刷新失败不阻断编辑 */ }
+}
+function renderGroups() {
+  const box=$("groupList"); box.innerHTML="";
+  if(!state.statuses.length){ box.innerHTML=`<div class="tag">暂无剪辑组。</div>`; return; }
+  for (const s of state.statuses) {
+    const card=document.createElement("div"); card.className="groupcard";
+    const parentName = s.parent_id ? (state.groups.find(g=>g.id===s.parent_id)||{}).name||"父组" : "—";
+    const trackChip = tid => {
+      const t=trackById(tid);
+      return `<span class="chip" style="border-color:${TRACK_COLOR[tid]||'var(--accent)'};color:${TRACK_COLOR[tid]||'var(--accent)'}">${t?t.name:tid}</span>`;
+    };
+    card.innerHTML = `
+      <b>${s.name}</b> <span class="tag">父组：${parentName}</span>
+      <div class="grange">联动范围：工程帧 ${s.range_start} … ${s.range_end}（共 ${s.range_end-s.range_start} 帧）</div>
+      <div class="chips">${s.member_tracks.map(trackChip).join("")}</div>
+      <div class="chips">
+        ${s.locked_tracks.map(t=>`<span class="chip lock">🔒 锁定 ${(trackById(t)||{}).name||t}</span>`).join("")}
+        ${s.hidden_tracks.map(t=>`<span class="chip hide">🙈 隐藏仍联动 ${(trackById(t)||{}).name||t}</span>`).join("")}
+      </div>
+      ${(s.conflicts||[]).map(c=>`<div class="conflict">⚠ ${c.reason}</div>`).join("")}
+      <div class="grouptools">
+        <input type="number" placeholder="移动 delta(帧)" style="flex:1" data-g="move">
+        <button class="mini" data-g="moveBtn">整组移动</button>
+        <input type="number" placeholder="淡化帧" style="flex:1" data-g="xf">
+        <button class="mini" data-g="xfBtn">分组交叉淡化</button>
+      </div>
+      <div class="grouptools">
+        <select data-g="parent" style="flex:1">
+          <option value="">设为顶级组</option>
+          ${state.groups.filter(g=>g.id!==s.id).map(g=>`<option value="${g.id}">父组：${g.name}</option>`).join("")}
+        </select>
+        <button class="mini" data-g="parentBtn">设置嵌套</button>
+        <button class="mini" data-g="addBtn">加入选中片段</button>
+      </div>`;
+    card.querySelector('[data-g="moveBtn"]').onclick=async()=>{
+      const delta=+card.querySelector('[data-g="move"]').value;
+      try { syncProject(await api(`/api/projects/${pid()}/groups/${s.id}/move`,{method:"POST",
+        body:JSON.stringify({ delta, zero_policy:$("zeroPolicy").value })}));
+        msg("整组移动：一次快照保存，撤销可恢复全部受影响轨道。","ok");
+      } catch(e){ msg(e.message,"err"); }
+    };
+    card.querySelector('[data-g="xfBtn"]').onclick=async()=>{
+      const frames=+card.querySelector('[data-g="xf"]').value;
+      try { const r=await api(`/api/projects/${pid()}/groups/${s.id}/crossfade`,{method:"POST",
+          body:JSON.stringify({ frames })});
+        syncProject(r.project);
+        msg("分组交叉淡化已按各轨真实余量统一落值。","ok");
+      } catch(e){ msg(e.message,"err"); }
+    };
+    card.querySelector('[data-g="parentBtn"]').onclick=async()=>{
+      const v=card.querySelector('[data-g="parent"]').value;
+      try { syncProject(await api(`/api/projects/${pid()}/groups/${s.id}/parent`,{method:"POST",
+        body:JSON.stringify({ parent_id:v? v : null })}));
+        msg("嵌套关系已更新（成环会被拒绝）。","ok");
+      } catch(e){ msg(e.message,"err"); }
+    };
+    card.querySelector('[data-g="addBtn"]').onclick=async()=>{
+      const it=state.selectedItem; if(!it) return msg("请先在泳道选中要加入的片段。","warn");
+      try { syncProject(await api(`/api/projects/${pid()}/groups/${s.id}/items`,{method:"POST",
+        body:JSON.stringify({ item_ids:[it.id] })}));
+        msg("片段已加入组并继承联动。","ok");
+      } catch(e){ msg(e.message,"err"); }
+    };
+    box.appendChild(card);
+  }
 }
 
 // ---------- 撤销 / 重做 ----------
-$("undoBtn").onclick=async()=>{ try{ syncProject(await api(`/api/projects/${state.project.id}/undo`,{method:"POST"}));
-  msg("已撤销（旧波形响应会因版本不符被丢弃）。","ok"); }catch(e){ msg(e.message,"warn"); }};
-$("redoBtn").onclick=async()=>{ try{ syncProject(await api(`/api/projects/${state.project.id}/redo`,{method:"POST"}));
+$("undoBtn").onclick=async()=>{ try{ syncProject(await api(`/api/projects/${pid()}/undo`,{method:"POST"}));
+  msg("已撤销：一次恢复该快照下全部轨道。","ok"); }catch(e){ msg(e.message,"warn"); }};
+$("redoBtn").onclick=async()=>{ try{ syncProject(await api(`/api/projects/${pid()}/redo`,{method:"POST"}));
   msg("已重做。","ok"); }catch(e){ msg(e.message,"warn"); }};
 
-// ---------- 波形（带版本戳，撤销后丢弃过期响应） ----------
+// ---------- 波形 ----------
 $("zoomIn").onclick=()=>{ state.bucketFrames=Math.max(1,Math.floor(state.bucketFrames/2)); $("zoomPill").textContent=`每桶 ${state.bucketFrames} 帧`; loadWaveform(); };
 $("zoomOut").onclick=()=>{ state.bucketFrames*=2; $("zoomPill").textContent=`每桶 ${state.bucketFrames} 帧`; loadWaveform(); };
 $("refreshWave").onclick=loadWaveform;
-
 async function loadWaveform() {
   if(!state.project) return;
   const since=state.project.version;
   try {
-    const r=await api(`/api/projects/${state.project.id}/waveform?bucket_frames=${state.bucketFrames}&since_version=${since}`);
-    // 版本防护：若返回的版本与当前工程不一致，标记过期而不是冒充现状。
-    if (r.version !== state.project.version || r.stale) {
-      setStale(true); msg("波形计算期间工程已变化（可能是撤销），已丢弃旧结果。","warn");
-      return;
-    }
+    const r=await api(`/api/projects/${pid()}/waveform?bucket_frames=${state.bucketFrames}&since_version=${since}`);
+    if (r.version !== state.project.version || r.stale) { setStale(true);
+      msg("波形计算期间工程已变化（可能是撤销），已丢弃旧结果。","warn"); return; }
     state.tlBuckets=r.buckets;
-    drawBuckets($("tlCanvas"), r.buckets, state.items, true);
+    drawBuckets($("tlCanvas"), r.buckets);
   } catch(e){ msg("波形加载失败："+e.message,"err"); }
 }
 async function loadSourceWave() {
   if(!state.selectedSource) return;
-  const r=await api(`/api/projects/${state.project.id}/waveform?bucket_frames=256&source_id=${state.selectedSource.id}`);
+  const r=await api(`/api/projects/${pid()}/waveform?bucket_frames=256&source_id=${state.selectedSource.id}`);
   state.srcBuckets=r.buckets;
-  drawBuckets($("srcCanvas"), r.buckets, [], false);
+  drawSource($("srcCanvas"), r.buckets);
   $("srcInfo").textContent=`素材 ${state.selectedSource.id.slice(-6)}：${state.selectedSource.original_rate}Hz，
     共 ${state.selectedSource.frame_count} 源帧（点击波形取源帧）`;
 }
-
-function drawBuckets(canvas, buckets, items, drawItems) {
+function drawBuckets(canvas, buckets) {
   const dpr=window.devicePixelRatio||1;
   const w=canvas.clientWidth, h=canvas.clientHeight;
   canvas.width=w*dpr; canvas.height=h*dpr;
-  const ctx=canvas.getContext("2d"); ctx.scale(dpr,dpr);
-  ctx.clearRect(0,0,w,h);
+  const ctx=canvas.getContext("2d"); ctx.scale(dpr,dpr); ctx.clearRect(0,0,w,h);
   const mid=h/2;
   ctx.strokeStyle="#5aa2ff"; ctx.lineWidth=1; ctx.beginPath();
   const bw=Math.max(1,w/buckets.length);
-  buckets.forEach((b,i)=>{
-    const x=i*bw;
-    ctx.moveTo(x, mid + b.max*mid*0.9);
-    ctx.lineTo(x, mid + b.min*mid*0.9);
-  });
+  buckets.forEach((b,i)=>{ const x=i*bw;
+    ctx.moveTo(x, mid + b.max*mid*0.9); ctx.lineTo(x, mid + b.min*mid*0.9); });
   ctx.stroke();
   ctx.strokeStyle="#3a424d"; ctx.beginPath(); ctx.moveTo(0,mid); ctx.lineTo(w,mid); ctx.stroke();
-  if(drawItems && items.length) {
-    const total=Math.max(1,timelineTotal());
-    ctx.fillStyle="rgba(90,162,255,.12)"; ctx.strokeStyle="#33507a";
-    items.forEach((it,idx)=>{
-      const src=state.sources.find(s=>s.id===it.source_id);
-      const sr=src?src.original_rate:state.project.sample_rate;
-      const len=Math.round((it.source_end-it.source_start)*state.project.sample_rate/sr);
-      const x=it.timeline_start/total*w, ww=Math.max(2,len/total*w);
-      ctx.fillRect(x,0,ww,h); ctx.strokeRect(x,0,ww,h);
-      if(it.crossfade_out>0){ ctx.fillStyle="rgba(255,180,84,.35)";
-        ctx.fillRect(x+ww-it.crossfade_out/total*w,0,it.crossfade_out/total*w,h); ctx.fillStyle="rgba(90,162,255,.12)"; }
-      ctx.fillStyle="#8a93a0"; ctx.fillText("#"+(idx+1), x+3, 12);
-    });
-  }
-  // 游标
-  if(drawItems){
-    const total=Math.max(1,timelineTotal());
-    const x=state.cursor/total*w;
-    ctx.strokeStyle="#ff6b6b"; ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,h); ctx.stroke();
-  }
+  const {lo,span}=timelineBounds();
+  if(lo<0){ const x=(0-lo)/span*w; ctx.strokeStyle="#ff6b6b";
+    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,h); ctx.stroke(); }
+  const x=Math.max(0,(state.cursor-lo)/span*w);
+  ctx.strokeStyle="#ff6b6b"; ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,h); ctx.stroke();
+}
+function drawSource(canvas, buckets) {
+  const dpr=window.devicePixelRatio||1;
+  const w=canvas.clientWidth, h=canvas.clientHeight;
+  canvas.width=w*dpr; canvas.height=h*dpr;
+  const ctx=canvas.getContext("2d"); ctx.scale(dpr,dpr); ctx.clearRect(0,0,w,h);
+  const mid=h/2; ctx.strokeStyle="#58d68d"; ctx.lineWidth=1; ctx.beginPath();
+  const bw=Math.max(1,w/buckets.length);
+  buckets.forEach((b,i)=>{ const x=i*bw;
+    ctx.moveTo(x, mid + b.max*mid*0.9); ctx.lineTo(x, mid + b.min*mid*0.9); });
+  ctx.stroke();
 }
 $("tlCanvas").onclick = e => {
   const rect=e.target.getBoundingClientRect();
   const frac=(e.clientX-rect.left)/rect.width;
-  state.cursor=Math.round(frac*Math.max(1,timelineTotal()));
+  const {lo,span}=timelineBounds();
+  state.cursor=Math.round(lo + frac*span);
   $("curFrame").textContent=state.cursor;
-  if(state.tlBuckets) drawBuckets($("tlCanvas"), state.tlBuckets, state.items, true);
+  if(state.tlBuckets) drawBuckets($("tlCanvas"), state.tlBuckets);
 };
 $("srcCanvas").onclick = e => {
   if(!state.selectedSource || !state.srcBuckets) return;
@@ -417,18 +642,18 @@ $("srcCanvas").onclick = e => {
   msg(`已在源帧 ${srcFrame} 定位（可用于切分或截取）。`,"ok");
 };
 
-// ---------- 游标双向定位 ----------
+// ---------- 游标定位 ----------
 $("locateSrc").onclick = async () => {
   const it=state.selectedItem; if(!it) return msg("请先选择片段。","warn");
-  const r=await api(`/api/projects/${state.project.id}/locate?direction=to_source&frame=${state.cursor}&item_id=${it.id}`);
+  const r=await api(`/api/projects/${pid()}/locate?direction=to_source&frame=${state.cursor}&item_id=${it.id}`);
   $("locateOut").textContent=`→ 素材 ${r.source_id.slice(-6)} 源帧 ${r.source_frame}`;
 };
 
-// ---------- 预览（与导出同一渲染函数） ----------
+// ---------- 预览 ----------
 $("previewBtn").onclick = async () => {
   $("previewPill").textContent="渲染中…"; $("previewPill").className="pill";
   try {
-    const r=await api(`/api/projects/${state.project.id}/render?since_version=${state.project.version}`);
+    const r=await api(`/api/projects/${pid()}/render?since_version=${state.project.version}`);
     if(r.version!==state.project.version){ $("previewPill").textContent="结果已过期"; $("previewPill").className="pill stale"; return; }
     const pcm=f32ToWav(r.frames, r.sample_rate, r.channels);
     if(state.previewUrl) URL.revokeObjectURL(state.previewUrl);
@@ -449,20 +674,31 @@ function f32ToWav(f32, rate, ch) {
   return buf;
 }
 
-// ---------- 导出 / 取消 ----------
+// ---------- 导出 / 分轨 / 取消 ----------
 $("exportBtn").onclick = async () => {
   const dest=`${state.project.name.replace(/[^\w.-]/g,"_")}_v${state.project.version}.wav`;
   $("exportBtn").disabled=true; $("cancelExportBtn").disabled=false;
-  msg("导出中（临时文件，完成后原子替换）…");
+  msg("导出混音中（临时文件，完成后原子替换）…");
   try {
-    const r=await api(`/api/projects/${state.project.id}/export`,{method:"POST",body:JSON.stringify({dest})});
+    const r=await api(`/api/projects/${pid()}/export`,{method:"POST",body:JSON.stringify({dest})});
     if(r.cancelled){ msg("导出已取消，未留下半成品文件。","warn"); }
-    else msg(`导出完成：${r.path}（${r.frames} 帧）。预览与导出使用同一渲染路径。`,"ok");
+    else msg(`混音导出完成：${r.path}（${r.frames} 帧，版本 v${state.project.version}）。`,"ok");
   } catch(e){ msg("导出失败："+e.message,"err"); }
   finally { $("exportBtn").disabled=false; $("cancelExportBtn").disabled=true; }
 };
+$("exportStemsBtn").onclick = async () => {
+  const dest=`${state.project.name.replace(/[^\w.-]/g,"_")}_stems_v${state.project.version}.wav`;
+  $("exportStemsBtn").disabled=true;
+  msg("导出分轨中：混音 + 每轨 WAV，全部引用同一工程修订…");
+  try {
+    const r=await api(`/api/projects/${pid()}/export/stems`,{method:"POST",body:JSON.stringify({dest})});
+    if(r.cancelled){ msg("分轨导出已取消。","warn"); }
+    else msg(`分轨导出完成（统一版本 v${r.version}）：混音 ${r.mix_path}；${r.stems.length} 条分轨。`,"ok");
+  } catch(e){ msg("分轨导出失败："+e.message,"err"); }
+  finally { $("exportStemsBtn").disabled=false; }
+};
 $("cancelExportBtn").onclick = async () => {
-  const r=await api(`/api/projects/${state.project.id}/export/cancel`,{method:"POST"});
+  const r=await api(`/api/projects/${pid()}/export/cancel`,{method:"POST"});
   msg(`已请求取消 ${r.cancelled_jobs} 个任务。`,"warn");
 };
 </script>

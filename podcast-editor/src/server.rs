@@ -13,10 +13,11 @@ use serde::Deserialize;
 use tower_http::services::ServeDir;
 
 use crate::domain::{
-    frames_to_rate, project_frame_to_source, Item, Project, Source,
+    frames_to_rate, project_frame_to_source, EditGroup, Item, Project, Source, Track,
 };
 use crate::edit;
 use crate::export::export_wav;
+use crate::link::{self, ZeroPolicy};
 use crate::render::{render, CancelToken};
 use crate::state::{versioned, AppState, Versioned};
 use crate::wav::write_wav;
@@ -34,6 +35,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/projects/{pid}/sources", post(upload_source).get(list_sources))
         .route("/api/projects/{pid}/sources/register", post(register_source))
         .route("/api/projects/{pid}/items", post(add_item).get(get_items))
+        .route("/api/projects/{pid}/items/delete", post(delete_item))
         .route("/api/projects/{pid}/trim", post(trim))
         .route("/api/projects/{pid}/split", post(split))
         .route("/api/projects/{pid}/reorder", post(reorder))
@@ -46,7 +48,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/projects/{pid}/waveform", get(waveform))
         .route("/api/projects/{pid}/locate", get(locate))
         .route("/api/projects/{pid}/export", post(do_export))
+        .route("/api/projects/{pid}/export/stems", post(do_export_stems))
         .route("/api/projects/{pid}/export/cancel", post(cancel_export))
+        .route("/api/projects/{pid}/tracks", get(list_tracks))
+        .route("/api/projects/{pid}/tracks/{tid}", post(update_track))
+        .route("/api/projects/{pid}/groups", get(list_groups).post(create_group))
+        .route("/api/projects/{pid}/groups/{gid}/items", post(group_add_items))
+        .route("/api/projects/{pid}/groups/{gid}/parent", post(set_group_parent))
+        .route("/api/projects/{pid}/groups/{gid}/move", post(move_group))
+        .route("/api/projects/{pid}/groups/{gid}/crossfade", post(group_crossfade))
+        .route("/api/projects/{pid}/groups/status", get(group_status))
         .route("/api/test-signal", post(make_test_signal))
         .fallback_service(ServeDir::new("static"))
         .with_state(state)
@@ -71,6 +82,8 @@ async fn create_project(
         sample_rate: req.sample_rate,
         channels: req.channels,
         version: 1,
+        tracks: Project::default_tracks(),
+        groups: vec![],
         items: vec![],
         silences: vec![],
     };
@@ -195,6 +208,12 @@ struct AddItemReq {
     source_id: String,
     source_start: i64,
     source_end: i64,
+    /// 目标轨道；缺省时旧单轨工程落到 legacy 轨，新工程落到主持人轨。
+    #[serde(default)]
+    track_id: Option<String>,
+    /// 显式工程帧起点；缺省时追加到该轨当前最后一条片段之后。
+    #[serde(default)]
+    timeline_start: Option<i64>,
 }
 
 async fn add_item(
@@ -213,17 +232,49 @@ async fn add_item(
     {
         return Err(err("引用范围超出素材或为空"));
     }
+    let track_id = match req.track_id {
+        Some(t) => {
+            if p.track(&t).is_none() {
+                return Err(err(format!("轨道 {t} 不存在")));
+            }
+            t
+        }
+        None => {
+            if p.tracks.len() == 1 && p.tracks[0].role == "legacy" {
+                crate::domain::TRACK_LEGACY.to_string()
+            } else {
+                crate::domain::TRACK_HOST.to_string()
+            }
+        }
+    };
+    if p.is_locked(&track_id) {
+        return Err(err(format!("轨道 {track_id} 已锁定，不能加入片段")));
+    }
+    let rates = st.source_rate_map(&pid);
+    let pos = if let Some(pos) = req.timeline_start {
+        pos
+    } else {
+        let last = p
+            .items
+            .iter()
+            .filter(|i| i.track_id == track_id)
+            .map(|i| link::item_end(i, &rates, p.sample_rate))
+            .max()
+            .unwrap_or_else(|| {
+                p.track(&track_id).map(|t| t.start_offset).unwrap_or(0).max(0)
+            });
+        last
+    };
     p.items.push(Item {
         id: edit::new_id("item"),
         source_id: req.source_id,
+        track_id,
         source_start: req.source_start,
         source_end: req.source_end,
-        timeline_start: 0,
+        timeline_start: pos,
         crossfade_out: 0,
     });
     p.version += 1;
-    let rates = st.source_rate_map(&pid);
-    let p = edit::layout(p, &rates);
     st.db.save_version(&p).map_err(err)?;
     Ok(Json(p))
 }
@@ -251,9 +302,8 @@ async fn trim(
     let _lk = st.lock_for(&pid);
     let _g = _lk.lock().unwrap();
     let p = st.db.load_project(&pid).map_err(err)?;
-    let rates = st.source_rate_map(&pid);
-    let mut p = edit::trim_item(p, &rates, &req.item_id, req.source_start, req.source_end)
-        .map_err(err)?;
+    // 单轨修剪：只改引用范围，不重排时间线，其他轨道工程位置原样保留。
+    let mut p = link::trim_item(p, &req.item_id, req.source_start, req.source_end).map_err(err)?;
     p.version += 1;
     st.db.save_version(&p).map_err(err)?;
     Ok(Json(p))
@@ -274,7 +324,7 @@ async fn split(
     let _g = _lk.lock().unwrap();
     let p = st.db.load_project(&pid).map_err(err)?;
     let rates = st.source_rate_map(&pid);
-    let mut p = edit::split_item(p, &rates, &req.item_id, req.at_source_frame).map_err(err)?;
+    let mut p = link::split_item(p, &rates, &req.item_id, req.at_source_frame).map_err(err)?;
     p.version += 1;
     st.db.save_version(&p).map_err(err)?;
     Ok(Json(p))
@@ -293,9 +343,47 @@ async fn reorder(
 ) -> Result<Json<Project>, ApiError> {
     let _lk = st.lock_for(&pid);
     let _g = _lk.lock().unwrap();
-    let p = st.db.load_project(&pid).map_err(err)?;
-    let rates = st.source_rate_map(&pid);
-    let mut p = edit::reorder(p, &rates, &req.item_id, req.target_index).map_err(err)?;
+    let mut p = st.db.load_project(&pid).map_err(err)?;
+    let pos = p
+        .items
+        .iter()
+        .position(|i| i.id == req.item_id)
+        .ok_or_else(|| err(format!("片段 {} 不存在", req.item_id)))?;
+    if p.is_locked(&p.items[pos].track_id) {
+        return Err(err(format!(
+            "轨道 {} 已锁定，不能调整顺序",
+            p.items[pos].track_id
+        )));
+    }
+    // 仅在同一轨道内调整 Vec 顺序；时间线位置保持各自绝对值，不触发全局重排。
+    let track_id = p.items[pos].track_id.clone();
+    let track_positions: Vec<usize> = p
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| i.track_id == track_id)
+        .map(|(idx, _)| idx)
+        .collect();
+    if req.target_index >= track_positions.len() {
+        return Err(err(format!(
+            "目标索引 {} 越界（该轨共 {} 条片段）",
+            req.target_index,
+            track_positions.len()
+        )));
+    }
+    let item = p.items.remove(pos);
+    let new_track_positions: Vec<usize> = p
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| i.track_id == track_id)
+        .map(|(idx, _)| idx)
+        .collect();
+    let insert_at = new_track_positions
+        .get(req.target_index)
+        .copied()
+        .unwrap_or(p.items.len());
+    p.items.insert(insert_at, item);
     p.version += 1;
     st.db.save_version(&p).map_err(err)?;
     Ok(Json(p))
@@ -315,32 +403,41 @@ async fn crossfade(
     let _lk = st.lock_for(&pid);
     let _g = _lk.lock().unwrap();
     let p = st.db.load_project(&pid).map_err(err)?;
-    // 先基于「请求的新淡化长度」计算真实余量，前端据此提示素材到头时的可用长度。
+    if p.is_locked(
+        &p.items
+            .iter()
+            .find(|i| i.id == req.item_id)
+            .map(|i| i.track_id.clone())
+            .unwrap_or_default(),
+    ) {
+        return Err(err("该片段所在轨道已锁定"));
+    }
+    // 同轨相邻才构成淡化对：按轨道分组排序后取下一条。
     let map = st.sources_meta(&pid);
-    let sorted = {
-        let mut v = p.items.clone();
-        v.sort_by_key(|i| i.timeline_start);
-        v
-    };
-    let pos = sorted.iter().position(|i| i.id == req.item_id);
-    let margin = if let Some(i) = pos {
-        if let Some(next) = sorted.get(i + 1) {
-            // 用请求值构造临时片段来评估，而不是用数据库里的旧值。
-            let mut candidate = sorted[i].clone();
-            candidate.crossfade_out = req.frames;
-            Some(crate::domain::check_crossfade(
-                &candidate, next, &map, p.sample_rate,
-            ))
-        } else {
-            None
+    let margin = {
+        let cur = p.items.iter().find(|i| i.id == req.item_id);
+        let next = cur.and_then(|c| {
+            p.items
+                .iter()
+                .filter(|i| i.track_id == c.track_id && i.timeline_start > c.timeline_start)
+                .min_by_key(|i| i.timeline_start)
+        });
+        match (cur, next) {
+            (Some(c), Some(n)) => {
+                let mut candidate = c.clone();
+                candidate.crossfade_out = req.frames;
+                Some(crate::domain::check_crossfade(
+                    &candidate,
+                    n,
+                    &map,
+                    p.sample_rate,
+                ))
+            }
+            _ => None,
         }
-    } else {
-        None
     };
 
     let mut p = edit::set_crossfade(p, &req.item_id, req.frames).map_err(err)?;
-    let rates = st.source_rate_map(&pid);
-    p = edit::layout(p, &rates);
     p.version += 1;
     st.db.save_version(&p).map_err(err)?;
     Ok(Json(CrossfadeResp {
@@ -367,10 +464,13 @@ async fn add_silence(
 ) -> Result<Json<Project>, ApiError> {
     let _lk = st.lock_for(&pid);
     let _g = _lk.lock().unwrap();
-    let p = st.db.load_project(&pid).map_err(err)?;
+    let mut p = st.db.load_project(&pid).map_err(err)?;
     let rates = st.source_rate_map(&pid);
-    let mut p = edit::append_silence(p, req.length).map_err(err)?;
-    p = edit::layout(p, &rates);
+    let start = crate::domain::timeline_length(&p, &rates);
+    p = edit::append_silence(p, req.length).map_err(err)?;
+    if let Some(s) = p.silences.last_mut() {
+        s.timeline_start = start;
+    }
     p.version += 1;
     st.db.save_version(&p).map_err(err)?;
     Ok(Json(p))
@@ -431,8 +531,11 @@ fn collect_loaded(
     let mut meta_map = HashMap::new();
     let mut loaded = crate::render::LoadedSources::new();
     for m in metas {
-        let w = st.load_source(&m.id, &m).map_err(err)?;
-        loaded.insert(m.id.clone(), w);
+        // 读取失败（源文件丢失/损坏）不在此抛裸 IO 错误：保留元数据、跳过加载，
+        // 交给 render::preflight 产出携带 item_id 与原因的结构化「缺失」错误。
+        if let Ok(w) = st.load_source(&m.id, &m) {
+            loaded.insert(m.id.clone(), w);
+        }
         meta_map.insert(m.id.clone(), m);
     }
     Ok((meta_map, loaded))
@@ -652,11 +755,55 @@ async fn do_export(
     }
 }
 
+/// 分轨导出：混音 + 每轨 WAV，全部引用同一工程修订（project.version）。
+async fn do_export_stems(
+    State(st): State<Arc<AppState>>,
+    AxumPath(pid): AxumPath<String>,
+    Json(req): Json<ExportReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let key = format!("{pid}:{}", edit::new_id("job"));
+    let token = Arc::new(CancelToken::default());
+    if st.pending_cancels.remove(&pid).is_some() {
+        token.cancel();
+    }
+    st.exports.insert(key.clone(), token.clone());
+
+    let p = st.db.load_project(&pid).map_err(err)?;
+    let (metas, loaded) = collect_loaded(&st, &pid)?;
+    let db_path_for_task = st.data_dir.clone();
+    let dest = req.dest.clone();
+
+    let outcome = tokio::task::spawn_blocking(move || {
+        for _ in 0..5 {
+            if token.is_cancelled() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let db = crate::db::Db::open(&format!("{db_path_for_task}/editor.sqlite")).ok();
+        crate::export::export_stems(&p, &metas, &loaded, &dest, token, db.as_ref())
+    })
+    .await
+    .map_err(|e| err(e))?;
+
+    st.exports.remove(&key);
+    match outcome {
+        Ok(o) => Ok(Json(serde_json::json!({
+            "cancelled": o.cancelled,
+            "version": o.version,
+            "mix_path": o.mix_path,
+            "stems": o.stems.iter().map(|(tid, path, frames)| serde_json::json!({
+                "track_id": tid, "path": path, "frames": frames,
+            })).collect::<Vec<_>>(),
+        }))),
+        Err(e) => Err(err(e)),
+    }
+}
+
 async fn cancel_export(
     State(st): State<Arc<AppState>>,
     AxumPath(pid): AxumPath<String>,
-) -> Json<serde_json::Value> {
-    let mut n = 0;
+) -> Json<serde_json::Value> {    let mut n = 0;
     st.exports.retain(|k, t| {
         if k.starts_with(&format!("{pid}:")) {
             t.cancel();
@@ -671,6 +818,224 @@ async fn cancel_export(
     // 至少有一个取消意图被记录即视为成功。
     let jobs = n.max(1);
     Json(serde_json::json!({ "cancelled_jobs": jobs }))
+}
+
+// ---------- 多轨：轨道管理 ----------
+
+async fn list_tracks(
+    State(st): State<Arc<AppState>>,
+    AxumPath(pid): AxumPath<String>,
+) -> Result<Json<Vec<Track>>, ApiError> {
+    let p = st.db.load_project(&pid).map_err(err)?;
+    Ok(Json(p.tracks))
+}
+
+#[derive(Deserialize)]
+struct TrackReq {
+    #[serde(default)]
+    locked: Option<bool>,
+    #[serde(default)]
+    hidden: Option<bool>,
+    #[serde(default)]
+    start_offset: Option<i64>,
+}
+
+async fn update_track(
+    State(st): State<Arc<AppState>>,
+    AxumPath((pid, tid)): AxumPath<(String, String)>,
+    Json(req): Json<TrackReq>,
+) -> Result<Json<Project>, ApiError> {
+    let _lk = st.lock_for(&pid);
+    let _g = _lk.lock().unwrap();
+    let mut p = st.db.load_project(&pid).map_err(err)?;
+    if let Some(v) = req.locked {
+        p = link::set_track_locked(p, &tid, v).map_err(err)?;
+    }
+    if let Some(v) = req.hidden {
+        p = link::set_track_hidden(p, &tid, v).map_err(err)?;
+    }
+    if let Some(v) = req.start_offset {
+        p = link::set_track_offset(p, &tid, v).map_err(err)?;
+    }
+    p.version += 1;
+    st.db.save_version(&p).map_err(err)?;
+    Ok(Json(p))
+}
+
+// ---------- 多轨：剪辑组 ----------
+
+async fn list_groups(
+    State(st): State<Arc<AppState>>,
+    AxumPath(pid): AxumPath<String>,
+) -> Result<Json<Vec<EditGroup>>, ApiError> {
+    let p = st.db.load_project(&pid).map_err(err)?;
+    Ok(Json(p.groups))
+}
+
+#[derive(Deserialize)]
+struct CreateGroupReq {
+    name: String,
+    item_ids: Vec<String>,
+    #[serde(default)]
+    parent_id: Option<String>,
+}
+
+async fn create_group(
+    State(st): State<Arc<AppState>>,
+    AxumPath(pid): AxumPath<String>,
+    Json(req): Json<CreateGroupReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let _lk = st.lock_for(&pid);
+    let _g = _lk.lock().unwrap();
+    let mut p = st.db.load_project(&pid).map_err(err)?;
+    let (p2, gid) =
+        link::create_group(p, &req.name, req.item_ids, req.parent_id).map_err(err)?;
+    p = p2;
+    p.version += 1;
+    st.db.save_version(&p).map_err(err)?;
+    Ok(Json(serde_json::json!({ "group_id": gid, "project": p })))
+}
+
+#[derive(Deserialize)]
+struct GroupItemsReq {
+    item_ids: Vec<String>,
+}
+
+async fn group_add_items(
+    State(st): State<Arc<AppState>>,
+    AxumPath((pid, gid)): AxumPath<(String, String)>,
+    Json(req): Json<GroupItemsReq>,
+) -> Result<Json<Project>, ApiError> {
+    let _lk = st.lock_for(&pid);
+    let _g = _lk.lock().unwrap();
+    let mut p = st.db.load_project(&pid).map_err(err)?;
+    p = link::add_items_to_group(p, &gid, req.item_ids).map_err(err)?;
+    p.version += 1;
+    st.db.save_version(&p).map_err(err)?;
+    Ok(Json(p))
+}
+
+#[derive(Deserialize)]
+struct GroupParentReq {
+    #[serde(default)]
+    parent_id: Option<String>,
+}
+
+async fn set_group_parent(
+    State(st): State<Arc<AppState>>,
+    AxumPath((pid, gid)): AxumPath<(String, String)>,
+    Json(req): Json<GroupParentReq>,
+) -> Result<Json<Project>, ApiError> {
+    let _lk = st.lock_for(&pid);
+    let _g = _lk.lock().unwrap();
+    let mut p = st.db.load_project(&pid).map_err(err)?;
+    p = link::set_group_parent(p, &gid, req.parent_id).map_err(err)?;
+    p.version += 1;
+    st.db.save_version(&p).map_err(err)?;
+    Ok(Json(p))
+}
+
+#[derive(Deserialize)]
+struct GroupMoveReq {
+    delta: i64,
+    #[serde(default = "default_policy")]
+    zero_policy: String,
+}
+
+fn default_policy() -> String {
+    "reject".to_string()
+}
+
+fn parse_policy(s: &str) -> Result<ZeroPolicy, ApiError> {
+    match s {
+        "reject" => Ok(ZeroPolicy::Reject),
+        "clip" => Ok(ZeroPolicy::Clip),
+        other => Err(err(format!("未知零点策略 {other}（允许 reject / clip）"))),
+    }
+}
+
+async fn move_group(
+    State(st): State<Arc<AppState>>,
+    AxumPath((pid, gid)): AxumPath<(String, String)>,
+    Json(req): Json<GroupMoveReq>,
+) -> Result<Json<Project>, ApiError> {
+    let _lk = st.lock_for(&pid);
+    let _g = _lk.lock().unwrap();
+    let mut p = st.db.load_project(&pid).map_err(err)?;
+    let policy = parse_policy(&req.zero_policy)?;
+    let rates = st.source_rate_map(&pid);
+    p = link::move_group(p, &rates, &gid, req.delta, policy).map_err(err)?;
+    p.version += 1;
+    st.db.save_version(&p).map_err(err)?;
+    Ok(Json(p))
+}
+
+#[derive(Deserialize)]
+struct GroupXfReq {
+    frames: i64,
+}
+
+async fn group_crossfade(
+    State(st): State<Arc<AppState>>,
+    AxumPath((pid, gid)): AxumPath<(String, String)>,
+    Json(req): Json<GroupXfReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let _lk = st.lock_for(&pid);
+    let _g = _lk.lock().unwrap();
+    let p = st.db.load_project(&pid).map_err(err)?;
+    let map = st.sources_meta(&pid);
+    // 评估始终返回每轨真实余量，便于界面展示冲突原因。
+    let margins = link::evaluate_group_crossfades(&p, &gid, req.frames, &map).map_err(err)?;
+    let feasible = margins.iter().all(|m| m.feasible);
+    let mut p = match link::set_group_crossfade(p, &gid, req.frames, &map) {
+        Ok(p) => p,
+        Err(e) => {
+            // 余量不足：整单拒绝，工程零变更（不产生新版本）。
+            return Err(err(e));
+        }
+    };
+    p.version += 1;
+    st.db.save_version(&p).map_err(err)?;
+    Ok(Json(serde_json::json!({ "project": p, "margins": margins, "feasible": feasible })))
+}
+
+async fn group_status(
+    State(st): State<Arc<AppState>>,
+    AxumPath(pid): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let p = st.db.load_project(&pid).map_err(err)?;
+    let rates = st.source_rate_map(&pid);
+    let statuses = link::group_statuses(&p, &rates);
+    Ok(Json(serde_json::json!({ "version": p.version, "groups": statuses })))
+}
+
+// ---------- 多轨：联动删除 ----------
+
+#[derive(Deserialize)]
+struct DeleteReq {
+    item_id: String,
+    #[serde(default)]
+    ripple: bool,
+    #[serde(default = "default_policy")]
+    zero_policy: String,
+}
+
+async fn delete_item(
+    State(st): State<Arc<AppState>>,
+    AxumPath(pid): AxumPath<String>,
+    Json(req): Json<DeleteReq>,
+) -> Result<Json<Project>, ApiError> {
+    let _lk = st.lock_for(&pid);
+    let _g = _lk.lock().unwrap();
+    let mut p = st.db.load_project(&pid).map_err(err)?;
+    let policy = parse_policy(&req.zero_policy)?;
+    let rates = st.source_rate_map(&pid);
+    // 原子保存：纯函数先完整算出新工程，成功后一次性写一个版本快照；
+    // 中途任何冲突（锁轨/零点）都在写入前返回，库里的当前修订不受影响。
+    p = link::delete_item(p, &rates, &req.item_id, req.ripple, policy).map_err(err)?;
+    p.version += 1;
+    st.db.save_version(&p).map_err(err)?;
+    Ok(Json(p))
 }
 
 // ---------- 测试信号 ----------

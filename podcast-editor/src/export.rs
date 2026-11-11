@@ -106,6 +106,134 @@ pub fn export_wav(
     })
 }
 
+/// 分轨导出产物：一条混音 + 每条轨道一个 WAV。
+/// 所有文件由同一 `project` 快照（同一 version 修订）渲染，
+/// 混音与分轨引用同一工程修订；任一失败整体失败、全部临时文件清理。
+pub struct StemOutcome {
+    pub mix_path: String,
+    /// (track_id, path, frames)
+    pub stems: Vec<(String, String, usize)>,
+    pub version: i64,
+    pub cancelled: bool,
+}
+
+/// 执行分轨导出。`dest` 为混音目标；分轨文件写在同目录，
+/// 命名为 `<混音名去后缀>__stem_<track_id>.wav`。
+pub fn export_stems(
+    project: &Project,
+    sources_meta: &std::collections::HashMap<String, Source>,
+    loaded: &LoadedSources,
+    dest: &str,
+    cancel: Arc<CancelToken>,
+    db: Option<&Db>,
+) -> Result<StemOutcome> {
+    // 先渲染混音（与单文件导出完全同一路径）。
+    let mix = export_wav(project, sources_meta, loaded, dest, cancel.clone(), db)?;
+    if mix.cancelled {
+        return Ok(StemOutcome {
+            mix_path: dest.to_string(),
+            stems: vec![],
+            version: project.version,
+            cancelled: true,
+        });
+    }
+
+    let dest_path = Path::new(dest);
+    let dir = dest_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("无效导出路径 {dest}"))?;
+    let base = dest_path
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("无效导出文件名"))?
+        .to_string();
+
+    let stems_data = match crate::render::render_stems(
+        project,
+        sources_meta,
+        loaded,
+        Some(cancel.as_ref()),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            if cancel.is_cancelled() {
+                if let Some(d) = db {
+                    let _ = d.log_export(&project.id, dest, project.version, "cancelled");
+                }
+                return Ok(StemOutcome {
+                    mix_path: dest.to_string(),
+                    stems: vec![],
+                    version: project.version,
+                    cancelled: true,
+                });
+            }
+            if let Some(d) = db {
+                let _ = d.log_export(&project.id, dest, project.version, "failed");
+            }
+            return Err(e);
+        }
+    };
+
+    let mut written = Vec::new();
+    let result = (|| -> Result<Vec<(String, String, usize)>> {
+        let mut out = Vec::new();
+        for (tid, buf) in &stems_data.tracks {
+            if cancel.is_cancelled() {
+                anyhow::bail!("render cancelled");
+            }
+            let stem_path = dir.join(format!("{base}__stem_{tid}.wav"));
+            let tmp = dir.join(format!(
+                ".{}.stem.tmp.{}",
+                stem_path.file_name().unwrap().to_string_lossy(),
+                std::process::id()
+            ));
+            write_wav(
+                &tmp.to_string_lossy(),
+                project.sample_rate,
+                project.channels,
+                buf,
+            )?;
+            std::fs::rename(&tmp, &stem_path)?;
+            let frames = buf.len() / project.channels as usize;
+            written.push(stem_path.clone());
+            out.push((tid.clone(), stem_path.to_string_lossy().to_string(), frames));
+        }
+        Ok(out)
+    })();
+
+    match result {
+        Ok(stems) => {
+            if let Some(d) = db {
+                for (_, path, _) in &stems {
+                    d.log_export(&project.id, path, project.version, "completed")?;
+                }
+            }
+            Ok(StemOutcome {
+                mix_path: dest.to_string(),
+                stems,
+                version: project.version,
+                cancelled: false,
+            })
+        }
+        Err(e) => {
+            // 回滚本次产生的分轨临时/目标文件（混音已原子提交，保留作为修订证据）。
+            for p in &written {
+                let _ = std::fs::remove_file(p);
+            }
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.contains(".stem.tmp.") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+            if let Some(d) = db {
+                let _ = d.log_export(&project.id, dest, project.version, "failed");
+            }
+            Err(e)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,9 +278,12 @@ mod tests {
             sample_rate: 48000,
             channels: 1,
             version: 1,
+            tracks: vec![],
+            groups: vec![],
             items: vec![Item {
                 id: "i".into(),
                 source_id: "s".into(),
+                track_id: crate::domain::TRACK_LEGACY.into(),
                 source_start: 0,
                 source_end: 4800,
                 timeline_start: 0,

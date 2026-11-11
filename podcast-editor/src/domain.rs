@@ -13,18 +13,28 @@ use serde::{Deserialize, Serialize};
 
 pub type Frame = i64;
 
+/// 三条固定角色轨道的 ID。新建工程自动创建；旧单轨工程归一化到 legacy 轨道。
+pub const TRACK_HOST: &str = "track_host";
+pub const TRACK_GUEST: &str = "track_guest";
+pub const TRACK_AMBIENCE: &str = "track_ambience";
+pub const TRACK_LEGACY: &str = "track_legacy";
+
 /// 一段对原始素材的引用。编辑只改这里的范围与顺序，原文件不被覆盖。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Item {
     pub id: String,
     pub source_id: String,
+    /// 所属轨道。旧工程快照缺省该字段，反序列化后为空串，载入时归一化到 legacy 轨道。
+    #[serde(default)]
+    pub track_id: String,
     /// 源文件中的起始帧（源采样率下的整数帧）。
     pub source_start: Frame,
     /// 源文件中的结束帧（不含）。
     pub source_end: Frame,
     /// 在工程时间线上的起始帧（工程采样率下的整数帧）。
+    /// 允许为负：负起点表示录音起点早于工程零点，越过零点的部分按 ZeroPolicy 处理。
     pub timeline_start: Frame,
-    /// 与下一条片段的交叉淡化长度（工程帧）；最后一条为 0。
+    /// 与同一轨道下一条片段的交叉淡化长度（工程帧）；最后一条为 0。
     pub crossfade_out: Frame,
 }
 
@@ -59,14 +69,33 @@ pub struct Source {
     pub frame_count: Frame,
 }
 
-impl Source {
-    /// 源帧 -> 工程帧的精确比例（工程帧 / 源帧），以有理数保留，不做浮点累积。
-    pub fn ratio_num(&self, project_rate: u32) -> u64 {
-        project_rate as u64
-    }
-    pub fn ratio_den(&self) -> u64 {
-        self.original_rate as u64
-    }
+/// 时间线轨道。隐藏只是显示状态：隐藏轨道上的片段仍参与所属剪辑组的
+/// 全部联动规则（波纹移动、锁轨冲突、跨淡化校验），不会因为未显示而失去同步。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Track {
+    pub id: String,
+    pub name: String,
+    pub role: String, // host | guest | ambience | legacy
+    /// 录音起点相对工程零点的独立偏移（工程帧，可为负）。
+    /// 同一条原始时间在不同轨道上通过各自偏移对齐；偏移只是位置语义，
+    /// 真正的片段位置仍以 item.timeline_start 为准。
+    pub start_offset: Frame,
+    pub hidden: bool,
+    /// 锁定后拒绝一切会改变该轨片段位置/范围的编辑（含联动波纹）。
+    pub locked: bool,
+}
+
+/// 剪辑组：把多条轨道上时间对齐的片段绑定为一个联动单元。
+/// 组可嵌套（parent_id 指向上级组）；嵌套关系不允许成环。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EditGroup {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// 成员片段。子组成员通过递归展开隐式包含，不在此列重复。
+    #[serde(default)]
+    pub item_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -76,8 +105,74 @@ pub struct Project {
     pub sample_rate: u32,
     pub channels: u16,
     pub version: i64,
+    #[serde(default)]
+    pub tracks: Vec<Track>,
+    #[serde(default)]
+    pub groups: Vec<EditGroup>,
     pub items: Vec<Item>,
     pub silences: Vec<SilenceItem>,
+}
+
+impl Project {
+    pub fn track(&self, track_id: &str) -> Option<&Track> {
+        self.tracks.iter().find(|t| t.id == track_id)
+    }
+
+    pub fn is_locked(&self, track_id: &str) -> bool {
+        self.track(track_id).is_some_and(|t| t.locked)
+    }
+
+    /// 旧单轨工程的归一化：没有轨道信息时补一条 legacy 轨，
+    /// 所有没有 track_id 的片段挂到该轨。不转换任何素材、不改写源文件。
+    pub fn normalize_legacy(&mut self) {
+        if self.tracks.is_empty() {
+            self.tracks.push(Track {
+                id: TRACK_LEGACY.to_string(),
+                name: "单轨工程".to_string(),
+                role: "legacy".to_string(),
+                start_offset: 0,
+                hidden: false,
+                locked: false,
+            });
+        }
+        for it in &mut self.items {
+            if it.track_id.is_empty() {
+                it.track_id = TRACK_LEGACY.to_string();
+            }
+        }
+        self.groups
+            .retain(|g| g.item_ids.iter().any(|id| self.items.iter().any(|i| &i.id == id)));
+    }
+
+    /// 新建三轨工程的标准轨道集（主持人 / 嘉宾 / 现场气氛），起点偏移均为 0。
+    pub fn default_tracks() -> Vec<Track> {
+        vec![
+            Track {
+                id: TRACK_HOST.to_string(),
+                name: "主持人".to_string(),
+                role: "host".to_string(),
+                start_offset: 0,
+                hidden: false,
+                locked: false,
+            },
+            Track {
+                id: TRACK_GUEST.to_string(),
+                name: "嘉宾".to_string(),
+                role: "guest".to_string(),
+                start_offset: 0,
+                hidden: false,
+                locked: false,
+            },
+            Track {
+                id: TRACK_AMBIENCE.to_string(),
+                name: "现场气氛".to_string(),
+                role: "ambience".to_string(),
+                start_offset: 0,
+                hidden: false,
+                locked: false,
+            },
+        ]
+    }
 }
 
 /// 把某个采样率下的帧数换算为另一采样率下的帧数（最近整数，仅用于长度/边界换算）。
@@ -148,6 +243,7 @@ pub fn check_crossfade(
 
 /// 时间线总长度（工程帧）：取所有片段/静音的最远结束位置。
 /// `rates` 提供每个素材的原始采样率，保证混合采样率下长度仍精确。
+/// 负起点片段只统计落在工程零点之后的部分（零点之前的素材被裁切或拒绝）。
 pub fn timeline_length(
     project: &Project,
     rates: &std::collections::HashMap<String, u32>,
@@ -164,7 +260,7 @@ pub fn timeline_length(
     for s in &project.silences {
         end = end.max(s.timeline_start + s.length);
     }
-    end
+    end.max(0)
 }
 
 #[cfg(test)]
@@ -212,6 +308,7 @@ mod tests {
         let item = Item {
             id: "i1".into(),
             source_id: "a".into(),
+            track_id: crate::domain::TRACK_LEGACY.into(),
             source_start: 0,
             source_end: 1000,
             timeline_start: 0,
@@ -221,6 +318,7 @@ mod tests {
         let next = Item {
             id: "i2".into(),
             source_id: "b".into(),
+            track_id: crate::domain::TRACK_LEGACY.into(),
             source_start: 0,
             source_end: 50,
             timeline_start: 1000,

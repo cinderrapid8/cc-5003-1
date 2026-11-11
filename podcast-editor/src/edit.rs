@@ -30,6 +30,7 @@ fn randish() -> u32 {
 /// 截取片段：把 item 的引用范围收窄/恢复到 [new_start, new_end)（源帧）。
 /// 只改引用，原录音始终完整保留，因此也支持向两侧恢复。
 /// 注意：版本号由服务层统一递增，本函数不改 version。
+#[allow(dead_code)]
 pub fn trim_item(
     mut p: Project,
     rates: &HashMap<String, u32>,
@@ -55,6 +56,7 @@ pub fn trim_item(
 }
 
 /// 把片段在某源帧处切成两段引用，原录音不动。
+#[allow(dead_code)]
 pub fn split_item(
     p: Project,
     rates: &HashMap<String, u32>,
@@ -74,6 +76,7 @@ pub fn split_item(
     let right = Item {
         id: new_id("item"),
         source_id: it.source_id.clone(),
+        track_id: it.track_id.clone(),
         source_start: at_source_frame,
         source_end: it.source_end,
         timeline_start: it.timeline_start,
@@ -90,6 +93,7 @@ pub fn split_item(
 }
 
 /// 调整顺序：把 item 移动到目标索引（按当前 Vec 顺序）。
+#[allow(dead_code)]
 pub fn reorder(
     mut p: Project,
     rates: &HashMap<String, u32>,
@@ -139,6 +143,8 @@ pub fn append_silence(mut p: Project, length: Frame) -> Result<Project> {
 /// 唯一的精确排版函数。按 items 的 Vec 顺序首尾相接；
 /// 每条静音按顺序作为相邻片段之间的空隙；交叉淡化使下一片段前移重叠。
 /// 所有长度用真实源速率精确换算为工程帧，不使用占位速率。
+/// 仅用于旧单轨工程与单元测试；多轨工程的片段位置由 link 模块按绝对工程帧管理。
+#[allow(dead_code)]
 pub fn layout(mut p: Project, rates: &HashMap<String, u32>) -> Project {
     let mut cursor: Frame = 0;
     let mut silence_idx = 0;
@@ -179,6 +185,8 @@ mod tests {
             sample_rate: 48000,
             channels: 1,
             version: 1,
+            tracks: vec![],
+            groups: vec![],
             items,
             silences: vec![],
         }
@@ -188,6 +196,7 @@ mod tests {
         Item {
             id: id.into(),
             source_id: "src".into(),
+            track_id: crate::domain::TRACK_LEGACY.into(),
             source_start: s,
             source_end: e,
             timeline_start: 0,

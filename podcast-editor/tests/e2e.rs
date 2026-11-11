@@ -18,6 +18,8 @@ mod db;
 mod edit;
 #[path = "../src/export.rs"]
 mod export;
+#[path = "../src/link.rs"]
+mod link;
 #[path = "../src/render.rs"]
 mod render;
 #[path = "../src/resample.rs"]
@@ -49,15 +51,19 @@ fn source(id: &str, rate: u32, frames: i64, w: WavData) -> (Source, Arc<WavData>
 }
 
 fn project(items: Vec<Item>, rate: u32) -> Project {
-    Project {
+    let mut p = Project {
         id: "p".into(),
         name: "e2e".into(),
         sample_rate: rate,
         channels: 1,
         version: 1,
+        tracks: vec![],
+        groups: vec![],
         items,
         silences: vec![],
-    }
+    };
+    p.normalize_legacy();
+    p
 }
 
 #[test]
@@ -76,6 +82,7 @@ fn pulse_lands_at_exact_output_sample_after_concat() {
             Item {
                 id: "i1".into(),
                 source_id: "a".into(),
+                track_id: domain::TRACK_LEGACY.into(),
                 source_start: 0,
                 source_end: 100,
                 timeline_start: 0,
@@ -84,6 +91,7 @@ fn pulse_lands_at_exact_output_sample_after_concat() {
             Item {
                 id: "i2".into(),
                 source_id: "b".into(),
+                track_id: domain::TRACK_LEGACY.into(),
                 source_start: 0,
                 source_end: 100,
                 timeline_start: 100,
@@ -124,6 +132,7 @@ fn phase_sine_concat_has_no_extra_jump_at_boundary() {
             Item {
                 id: "i1".into(),
                 source_id: "s".into(),
+                track_id: domain::TRACK_LEGACY.into(),
                 source_start: 0,
                 source_end: 80,
                 timeline_start: 0,
@@ -132,6 +141,7 @@ fn phase_sine_concat_has_no_extra_jump_at_boundary() {
             Item {
                 id: "i2".into(),
                 source_id: "s".into(),
+                track_id: domain::TRACK_LEGACY.into(),
                 source_start: 80,
                 source_end: 200,
                 timeline_start: 80,
@@ -171,6 +181,7 @@ fn mixed_sample_rate_is_exact_without_drift() {
         vec![Item {
             id: "i".into(),
             source_id: "lo".into(),
+            track_id: domain::TRACK_LEGACY.into(),
             source_start: 0,
             source_end: 44100,
             timeline_start: 0,
@@ -204,6 +215,7 @@ fn crossfade_reports_available_length_when_source_runs_out() {
             Item {
                 id: "i1".into(),
                 source_id: "a".into(),
+                track_id: domain::TRACK_LEGACY.into(),
                 source_start: 0,
                 source_end: 1000,
                 timeline_start: 0,
@@ -212,6 +224,7 @@ fn crossfade_reports_available_length_when_source_runs_out() {
             Item {
                 id: "i2".into(),
                 source_id: "b".into(),
+                track_id: domain::TRACK_LEGACY.into(),
                 source_start: 0,
                 source_end: 40,
                 timeline_start: 0,
@@ -249,6 +262,7 @@ fn cancel_mid_render_leaves_no_half_file() {
         vec![Item {
             id: "i".into(),
             source_id: "s".into(),
+            track_id: domain::TRACK_LEGACY.into(),
             source_start: 0,
             source_end: 96000,
             timeline_start: 0,
@@ -274,12 +288,13 @@ fn cursor_locates_both_directions_in_sample_frames() {
     // 48k 工程、48k 素材：时间线帧与源帧应能往返互定位。
     let src = signals::single_pulse(48000, 1000, 0);
     let (meta, _w) = source("s", 48000, 1000, src);
-    let metas: HashMap<String, Source> = HashMap::from([("s".into(), meta.clone())]);
+    let _metas: HashMap<String, Source> = HashMap::from([("s".into(), meta.clone())]);
     let rates = HashMap::from([("s".to_string(), 48000u32)]);
     let p = project(
         vec![Item {
             id: "i".into(),
             source_id: "s".into(),
+            track_id: domain::TRACK_LEGACY.into(),
             source_start: 100,
             source_end: 600,
             timeline_start: 0,
@@ -315,6 +330,7 @@ fn speech_rhythm_renders_with_real_dynamics_and_finite_values() {
         vec![Item {
             id: "i".into(),
             source_id: "s".into(),
+            track_id: domain::TRACK_LEGACY.into(),
             source_start: 0,
             source_end: 24000,
             timeline_start: 0,

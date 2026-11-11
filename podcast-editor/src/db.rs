@@ -188,6 +188,8 @@ impl Db {
     }
 
     /// 重开工程：读项目元数据 + current_version 快照，重建完整 Project。
+    /// 旧单轨工程（无 tracks/groups 字段）在此归一化：补 legacy 轨道并把
+    /// 无 track_id 的片段挂上去，素材与源文件完全不转换。
     pub fn load_project(&self, project_id: &str) -> Result<Project> {
         let conn = self.conn.lock().unwrap();
         let (name, rate, ch, cur): (String, u32, u16, i64) = conn.query_row(
@@ -201,15 +203,19 @@ impl Db {
             |r| r.get(0),
         )?;
         let snap: TimelineSnapshot = serde_json::from_str(&json).context("parse timeline")?;
-        Ok(Project {
+        let mut p = Project {
             id: project_id.to_string(),
             name,
             sample_rate: rate,
             channels: ch,
             version: cur,
+            tracks: snap.tracks,
+            groups: snap.groups,
             items: snap.items,
             silences: snap.silences,
-        })
+        };
+        p.normalize_legacy();
+        Ok(p)
     }
 
     pub fn list_project_ids(&self) -> Result<Vec<String>> {
@@ -234,16 +240,66 @@ impl Db {
         )?;
         Ok(())
     }
+
+    /// 测试辅助：注入一个触发器，让新版本快照写入必然失败，
+    /// 用于验证「批量移动的原子保存」在保存中断时不留半提交。
+    /// SQLite 的 DDL 触发器本身随连接存活，drop 连接即消失。
+    pub fn inject_save_failure(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TRIGGER IF NOT EXISTS trg_fail_version_insert
+            BEFORE INSERT ON project_versions
+            BEGIN
+                SELECT RAISE(ABORT, 'injected save interruption');
+            END;
+            "#,
+        )?;
+        Ok(())
+    }
+
+    /// 测试辅助：以旧版快照格式（无 tracks/groups、item 无 track_id）建工程，
+    /// 验证旧单轨工程无需转换素材即可打开。
+    pub fn create_project_raw_legacy(
+        &self,
+        id: &str,
+        sample_rate: u32,
+        channels: u16,
+        timeline_json: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO projects (id,name,sample_rate,channels,current_version)
+             VALUES (?1,?2,?3,?4,1)",
+            rusqlite::params![id, "legacy", sample_rate, channels],
+        )?;
+        tx.execute(
+            "INSERT INTO project_versions (project_id,version,timeline_json,created_at)
+             VALUES (?1,1,?2,?3)",
+            rusqlite::params![id, timeline_json, now_ms()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 struct TimelineSnapshot {
+    #[serde(default)]
+    tracks: Vec<crate::domain::Track>,
+    #[serde(default)]
+    groups: Vec<crate::domain::EditGroup>,
+    #[serde(default)]
     items: Vec<crate::domain::Item>,
+    #[serde(default)]
     silences: Vec<crate::domain::SilenceItem>,
 }
 impl From<&Project> for TimelineSnapshot {
     fn from(p: &Project) -> Self {
         TimelineSnapshot {
+            tracks: p.tracks.clone(),
+            groups: p.groups.clone(),
             items: p.items.clone(),
             silences: p.silences.clone(),
         }
@@ -270,9 +326,12 @@ mod tests {
             sample_rate: 48000,
             channels: 1,
             version,
+            tracks: Project::default_tracks(),
+            groups: vec![],
             items: vec![Item {
                 id: "i".into(),
                 source_id: "s".into(),
+                track_id: crate::domain::TRACK_LEGACY.into(),
                 source_start: 0,
                 source_end: 100,
                 timeline_start: 0,

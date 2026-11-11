@@ -2,6 +2,7 @@ mod db;
 mod domain;
 mod edit;
 mod export;
+mod link;
 mod render;
 mod resample;
 mod server;
