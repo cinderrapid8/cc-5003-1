@@ -1,0 +1,25 @@
+# solo-manager GitHub sync ignores
+node_modules/
+vendor/
+dist/
+build/
+.next/
+.nuxt/
+.output/
+coverage/
+.turbo/
+.cache/
+.parcel-cache/
+.vite/
+target/
+.gradle/
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+*.log
+.env
+.env.*
